@@ -46,6 +46,6 @@ Current limitations:
 - Controller diagnostics are opt-in and should not be added to task
   observations by default.
 
-See `docs/roadmaps/robot-infra-roadmap.md` in the main `rl-garden` repo for
+See [`docs/robot-infra-roadmap.md`](../../docs/robot-infra-roadmap.md) for
 planned backend, dynamics, safety, and observability work.
 

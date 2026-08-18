@@ -17,4 +17,6 @@ real-world RL layer ([rlgarden-real-world](https://github.com/JaimeParker/rlgard
 not the other way around.
 
 See `robot_infra/controller/README.md` for the controller layering
-(`simulator wrappers -> adapters -> core`).
+(`simulator wrappers -> adapters -> core`), and
+[`docs/robot-infra-roadmap.md`](docs/robot-infra-roadmap.md) for planned
+backend, dynamics, safety, and observability work.
