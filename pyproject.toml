@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlgarden-robot-infra"
+version = "0.0.1"
+description = "Robot hardware/communication/control layer for rl-garden: impedance and pose controllers, the Franka Flask bridge and gripper server, and teleop devices (SpaceMouse, twist-based Pico teleop)."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy",
+    "gymnasium>=0.29",
+    "tyro",
+]
+
+[project.optional-dependencies]
+# controller/simulator/maniskill/: mani_skill-backed sim controllers.
+sim = ["mani_skill"]
+# controller/real/, teleop/spacemouse/: the Franka bridge/gripper Flask
+# servers and SpaceMouse teleop. ROS itself (rospy, franka_msgs,
+# serl_franka_controllers, franka_gripper, geometry_msgs, sensor_msgs),
+# required only on the machine running controller/real/franka_bridge.py, is
+# not pip-installable and must be set up separately -- see
+# franka_bridge.py's module docstring.
+real = ["flask", "pyzmq", "scipy", "pyspacemouse"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["robot_infra*"]
