@@ -36,6 +36,7 @@ class Gripper(ControllablePart, BackendRegistry, ABC):
         self._max_width_m = max_width_m
         self._mode = mode
         self._binary_threshold = binary_threshold
+        self._last_binary_open: bool | None = None
 
     @classmethod
     def from_config(
@@ -67,12 +68,25 @@ class Gripper(ControllablePart, BackendRegistry, ABC):
         self._require_connected()
         target = float(np.asarray(action["gripper"]).reshape(-1)[0])
         if self._mode is GripperMode.BINARY:
-            if target > self._binary_threshold:
+            # open()/close() can block on the hardware, so an unchanged binary command is not re-sent.
+            # Only commands sent through send_action are remembered; direct open()/close() are not.
+            should_open = target > self._binary_threshold
+            if should_open == self._last_binary_open:
+                return
+            if should_open:
                 self.open()
             else:
                 self.close()
+            self._last_binary_open = should_open
         else:
             self.move(float(np.clip(target, 0.0, 1.0)))
+
+    def _forget_binary_command(self) -> None:
+        """Call at the start of every session (own ``_open`` or borrowed ``_opened``)."""
+        self._last_binary_open = None
+
+    def _opened(self) -> None:
+        self._forget_binary_command()
 
     @abstractmethod
     def open(self) -> None: ...

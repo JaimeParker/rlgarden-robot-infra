@@ -121,3 +121,80 @@ def test_health_reports_fresh_frames(camera):
 def test_registry_and_discover():
     assert Camera.backend("fake") is FakeCamera
     assert FakeCamera.discover() == {"FAKE0", "FAKE1"}
+
+
+def test_reopen_after_disconnect_stays_closed():
+    camera = FakeCamera(config())
+    camera.connect()
+    thread = camera._capture_thread
+    camera.disconnect()
+    camera.reopen()
+    assert not camera.is_connected
+    assert camera._capture_thread is None
+    assert not thread.is_alive()
+
+
+def test_disconnect_during_reopen_leaves_no_live_device():
+    closed = []
+
+    class RacingCamera(FakeCamera):
+        opens = 0
+
+        def _open_device(self):
+            type(self).opens += 1
+            handle = {"open": type(self).opens}
+            if type(self).opens == 2:  # inside reopen(): another thread disconnects now
+                racer = threading.Thread(target=self.disconnect)
+                racer.start()
+                racer.join(timeout=0.2)  # blocks on the lifecycle lock until reopen returns
+                self.racer = racer
+            return handle
+
+        def _close_device(self, handle):
+            closed.append(handle["open"])
+
+    camera = RacingCamera(config())
+    camera.connect()
+    camera.reopen()
+    camera.racer.join(timeout=2.0)
+    assert not camera.racer.is_alive()
+    assert not camera.is_connected
+    assert camera._capture_thread is None
+    assert sorted(closed) == [1, 2]
+
+
+def test_concurrent_read_timeouts_reopen_once():
+    class CountingCamera(FakeCamera):
+        opens = 0
+
+        def _open_device(self):
+            type(self).opens += 1
+            return super()._open_device()
+
+    camera = CountingCamera(config())
+    camera.connect()
+    try:
+        session = camera._handle
+        camera._reopen_session(session)
+        camera._reopen_session(session)  # a second reader that timed out on the same session
+        assert CountingCamera.opens == 2
+    finally:
+        camera.disconnect()
+
+
+def test_failed_reopen_leaves_camera_disconnected():
+    class FlakyCamera(FakeCamera):
+        opens = 0
+
+        def _open_device(self):
+            type(self).opens += 1
+            if type(self).opens == 2:
+                raise RuntimeError("usb gone")
+            return super()._open_device()
+
+    camera = FlakyCamera(config(), fail_after=0, read_timeout_s=0.1, max_consecutive_failures=1)
+    camera.connect()
+    with pytest.raises(RuntimeError, match="usb gone"):
+        camera.read()
+    assert not camera.is_connected
+    assert camera._capture_thread is None

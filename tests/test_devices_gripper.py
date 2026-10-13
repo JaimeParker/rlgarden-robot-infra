@@ -71,3 +71,41 @@ def test_closed_action_value_and_registry():
     assert Gripper.closed_action_value == 0.0
     assert FakeGripper().is_grasped is None
     assert Gripper.backend("fake") is FakeGripper
+
+
+def test_unchanged_binary_command_is_not_reissued():
+    gripper = connected()
+    gripper.send_action({"gripper": np.array([0.9])})
+    gripper.send_action({"gripper": np.array([0.8])})
+    assert gripper.call_log.count("open") == 1
+    gripper.send_action({"gripper": np.array([0.1])})
+    gripper.send_action({"gripper": np.array([0.2])})
+    gripper.send_action({"gripper": np.array([0.9])})
+    assert gripper.call_log == ["open", "close", "open"]
+
+
+def test_binary_command_memory_resets_on_reconnect():
+    gripper = connected()
+    gripper.send_action({"gripper": np.array([0.9])})
+    gripper.disconnect()
+    gripper.connect()
+    gripper.send_action({"gripper": np.array([0.9])})
+    assert gripper.call_log.count("open") == 2
+
+
+def test_binary_command_memory_resets_when_borrowing_again():
+    arm = FakeArm()
+    gripper = FakeGripper(owner=arm)
+    gripper.connect()
+    gripper.send_action({"gripper": np.array([0.1])})
+    gripper.disconnect()
+    gripper.connect()
+    gripper.send_action({"gripper": np.array([0.1])})
+    assert gripper.call_log.count("close") == 2
+
+
+def test_continuous_mode_resends_every_command():
+    gripper = connected(mode=GripperMode.CONTINUOUS)
+    gripper.send_action({"gripper": np.array([0.3])})
+    gripper.send_action({"gripper": np.array([0.3])})
+    assert gripper.call_log.count("move") == 2

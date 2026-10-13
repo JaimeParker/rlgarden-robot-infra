@@ -117,9 +117,12 @@ def tcp_open(ip: str, port: int, timeout_s: float = 0.5) -> bool:
         return False
 
 
-def discover_cameras() -> dict[str, set[str]]:
+def discover_cameras(hardware_only: bool = False) -> dict[str, set[str]]:
+    """Serials per camera backend; ``hardware_only`` skips backends without a vendor SDK (the fake)."""
     cameras: dict[str, set[str]] = {}
     for name, backend_cls in sorted(Camera.backends().items()):
+        if hardware_only and backend_cls.SDK is None:
+            continue
         try:
             cameras[name] = set(backend_cls.discover())
         except Exception:
@@ -136,7 +139,7 @@ def discover_all(
         for ip in host_ips
     }
     return DiscoveryReport(
-        cameras=discover_cameras(),
+        cameras=discover_cameras(hardware_only=True),
         can_interfaces=list_can_interfaces(),
         hosts=hosts,
         hid_devices=sorted(glob.glob("/dev/hidraw*")),

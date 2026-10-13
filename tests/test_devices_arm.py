@@ -152,3 +152,33 @@ def test_drop_commands_leaves_state_unchanged(arm):
         state = arm.read_state()
     assert "servo_joints" in arm.call_log
     assert np.array_equal(state["joint_pos"], np.zeros(7))
+
+
+@pytest.mark.parametrize(
+    "mode, key, bad",
+    [
+        (ControlMode.JOINT_SERVO, "joint_pos", np.array([0.0, np.nan, 0, 0, 0, 0, 0])),
+        (ControlMode.CARTESIAN_SERVO, "tcp_pose", np.array([0.4, np.inf, 0.3, 0, 0, 0, 1.0])),
+    ],
+)
+def test_non_finite_action_rejected_before_servo(arm, mode, key, bad):
+    arm.set_control_mode(mode)
+    arm.call_log.clear()
+    with pytest.raises(ValueError, match="non-finite"):
+        arm.send_action({key: bad})
+    assert not any(entry.startswith("servo") for entry in arm.call_log)
+
+
+@pytest.mark.parametrize("quat", [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.01]])
+def test_non_unit_quaternion_rejected(arm, quat):
+    arm.set_control_mode(ControlMode.CARTESIAN_SERVO)
+    with pytest.raises(ValueError, match="quaternion norm"):
+        arm.send_action({"tcp_pose": np.array([0.4, 0.0, 0.3, *quat])})
+
+
+def test_near_unit_quaternion_is_normalized(arm):
+    arm.set_control_mode(ControlMode.CARTESIAN_SERVO)
+    quat = np.array([0.0, 0.0, 0.0, 1.0005])
+    command = arm._command_array({"tcp_pose": np.array([0.4, 0.0, 0.3, *quat])}, "tcp_pose", (7,))
+    np.testing.assert_allclose(command[3:], [0.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(command[:3], [0.4, 0.0, 0.3])

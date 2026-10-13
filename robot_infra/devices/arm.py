@@ -24,6 +24,7 @@ class ControlMode(Enum):
     JOINT_SERVO = "joint_servo"
 
 
+QUAT_NORM_TOLERANCE = 1e-3
 ARM_STATE_FIELDS = ("tcp_pose", "tcp_vel", "joint_pos", "joint_vel", "tcp_force", "tcp_torque")
 
 
@@ -127,6 +128,16 @@ class Arm(ControllablePart, BackendRegistry, ABC):
         value = np.asarray(action[key], dtype=np.float64)
         if value.shape != shape:
             raise ValueError(f"action '{key}' must have shape {shape}, got {value.shape}")
+        if not np.all(np.isfinite(value)):
+            raise ValueError(f"action '{key}' contains non-finite values: {value.tolist()}")
+        if key == "tcp_pose":
+            quat_norm = float(np.linalg.norm(value[3:]))
+            if abs(quat_norm - 1.0) > QUAT_NORM_TOLERANCE:
+                raise ValueError(
+                    f"action 'tcp_pose' quaternion norm is {quat_norm:.6f}, expected 1 "
+                    f"(tolerance {QUAT_NORM_TOLERANCE:g})"
+                )
+            value = np.concatenate([value[:3], value[3:] / quat_norm])
         return value
 
     def set_control_mode(self, mode: ControlMode) -> None:

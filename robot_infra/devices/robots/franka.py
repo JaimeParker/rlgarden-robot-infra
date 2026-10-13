@@ -16,6 +16,7 @@ class FrankaConfig(RobotConfig):
     name: str = "franka"
     arm_backend: str = "franky"
     robot_ip: str = "172.16.0.2"
+    bridge_url: str = "http://127.0.0.1:5000"
     gripper: GripperConfig | None = field(
         default_factory=lambda: GripperConfig(backend="franky", max_width_m=0.08, mode="binary")
     )

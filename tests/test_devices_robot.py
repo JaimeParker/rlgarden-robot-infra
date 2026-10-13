@@ -80,8 +80,8 @@ def test_unknown_and_missing_type():
 
 
 def test_unknown_arm_backend_lists_registered():
-    with pytest.raises(ValueError, match=r"\['fake'\]"):
-        FrankaRobot(FrankaConfig(gripper=None))
+    with pytest.raises(ValueError, match=r"'nonexistent'.*registered: \[.*'fake'.*\]"):
+        FrankaRobot(FrankaConfig(arm_backend="nonexistent", gripper=None))
 
 
 def test_config_validation():

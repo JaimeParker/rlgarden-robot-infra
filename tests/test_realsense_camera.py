@@ -194,3 +194,19 @@ def test_read_color_only_has_no_depth(install_rs):
 def test_registry_and_sdk_name():
     assert Camera.backend("realsense") is RealSenseCamera
     assert RealSenseCamera.SDK == "pyrealsense2"
+
+
+def test_color_frame_is_copied_out_of_the_sdk_buffer(install_rs, monkeypatch):
+    install_rs(["A1"])
+    sdk_buffer = np.full((HEIGHT, WIDTH, 3), 7, np.uint8)
+    monkeypatch.setattr(
+        FakeFrames, "get_color_frame", lambda self: SimpleNamespace(get_data=lambda: sdk_buffer)
+    )
+    camera = RealSenseCamera(config(serial="A1"))
+    camera.connect()
+    try:
+        frame = camera.read()
+    finally:
+        camera.disconnect()
+    np.testing.assert_array_equal(frame.color, sdk_buffer)
+    assert not np.shares_memory(frame.color, sdk_buffer)

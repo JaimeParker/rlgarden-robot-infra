@@ -54,9 +54,11 @@ class Camera(Part, BackendRegistry, ABC):
         self._seq = 0
         self._last_capture_error = ""
         self._caller_state = threading.local()
+        # Serializes open/release/reopen: a read() timeout may reopen from another thread.
         self._lifecycle_lock = threading.RLock()
         self._capture_thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
+        self._live_device: Any = None
 
     @property
     def config(self) -> CameraConfig:
@@ -79,26 +81,36 @@ class Camera(Part, BackendRegistry, ABC):
 
     @final
     def _open(self) -> Any:
-        handle = self._open_device()
-        self._stop_event = threading.Event()
-        self._capture_thread = threading.Thread(
-            target=self._capture_loop,
-            args=(handle, self._stop_event),
-            name=f"camera-{self.name}",
-            daemon=True,
-        )
-        self._capture_thread.start()
-        return handle
+        with self._lifecycle_lock:
+            handle = self._open_device()
+            self._live_device = handle
+            self._stop_event = threading.Event()
+            self._capture_thread = threading.Thread(
+                target=self._capture_loop,
+                args=(handle, self._stop_event),
+                name=f"camera-{self.name}",
+                daemon=True,
+            )
+            self._capture_thread.start()
+            return handle
 
     @final
     def _release(self, handle: Any) -> None:
+        # Closes whatever device is live: a concurrent reopen() may have replaced ``handle``.
+        with self._lifecycle_lock:
+            self._close_live_device()
+            self._handle = None
+
+    def _close_live_device(self) -> None:
         if self._stop_event is not None:
             self._stop_event.set()
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
         self._capture_thread = None
         self._stop_event = None
-        self._close_device(handle)
+        device, self._live_device = self._live_device, None
+        if device is not None:
+            self._close_device(device)
 
     @abstractmethod
     def _open_device(self) -> Any: ...
@@ -130,10 +142,12 @@ class Camera(Part, BackendRegistry, ABC):
 
     def read(self, timeout_s: float | None = None) -> Frame:
         self._require_connected()
+        session = self._handle
         timeout = self._read_timeout_s if timeout_s is None else timeout_s
         frame = self._wait_for_new_frame(timeout)
         if frame is None:
-            self.reopen()
+            # Two readers timing out together reopen once: the second sees a newer session.
+            self._reopen_session(session)
             frame = self._wait_for_new_frame(timeout)
         if frame is None:
             raise DeviceFault(
@@ -161,14 +175,28 @@ class Camera(Part, BackendRegistry, ABC):
             return self._condition.wait_for(lambda: self._latest is not None, timeout=timeout_s)
 
     def reopen(self) -> None:
+        self._reopen_session(self._handle)
+
+    def _reopen_session(self, session: Any) -> None:
+        """Restart the device if ``session`` is still the current one. ``_handle`` stays set
+        while reopening, so a concurrent disconnect() clears it and the new device is closed."""
         with self._lifecycle_lock:
-            handle, self._handle = self._handle, None
-            if handle is not None:
-                self._release(handle)
+            if session is None or self._handle is not session:
+                return
+            self._close_live_device()
             with self._condition:
                 self._latest = None
             self._last_capture_error = ""
-            self._handle = self._open()
+            try:
+                handle = self._open()
+            except BaseException:
+                if self._handle is session:
+                    self._handle = None
+                raise
+            if self._handle is not session:
+                self._close_live_device()
+                return
+            self._handle = handle
 
     def health(self) -> Health:
         frame = self.latest()

@@ -57,10 +57,10 @@ def test_ping_failure_does_not_skip_later_layers(monkeypatch):
 
 def test_unknown_backend_skips_later_layers():
     config = franka_config()
-    config.arm_backend = "franky"
+    config.arm_backend = "nonexistent"
     results = run_doctor(config)
     sdk_arm = next(result for result in results if result.name == "sdk:arm")
-    assert not sdk_arm.ok and "franky" in sdk_arm.message and sdk_arm.hint
+    assert not sdk_arm.ok and "nonexistent" in sdk_arm.message and sdk_arm.hint
     assert all(r.skipped for layer in (3, 4, 5) for r in by_layer(results, layer))
     assert exit_code(results) == 1
 

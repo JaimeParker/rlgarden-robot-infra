@@ -98,7 +98,8 @@ class RealSenseCamera(Camera):
         frames = handle.pipeline.wait_for_frames(timeout_ms=self._frame_timeout_ms())
         if handle.align is not None:
             frames = handle.align.process(frames)
-        color = np.asanyarray(frames.get_color_frame().get_data())
+        # Copy: a view would pin the librealsense frame and starve its small frame pool.
+        color = np.array(frames.get_color_frame().get_data(), copy=True)
         depth = None
         if handle.depth_scale is not None:
             raw_depth = np.asanyarray(frames.get_depth_frame().get_data())

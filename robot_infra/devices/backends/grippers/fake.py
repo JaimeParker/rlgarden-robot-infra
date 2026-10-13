@@ -61,12 +61,14 @@ class FakeGripper(Gripper):
         return self._width
 
     def _open(self) -> Any:
+        self._forget_binary_command()
         return {"opened": True}
 
     def _release(self, handle: Any) -> None:
         pass
 
     def _opened(self) -> None:
+        super()._opened()
         self.call_log.append("opened")
 
     def _closing(self) -> None:

@@ -5,6 +5,7 @@ import pytest
 
 from robot_infra.devices import CameraConfig
 from robot_infra.devices.backends.cameras.fake import FakeCamera
+from robot_infra.devices.backends.cameras.realsense import RealSenseCamera
 from robot_infra.devices.robots.franka import FrankaConfig
 from robot_infra.devices.robots.piper import PiperConfig
 from robot_infra.discovery import enumerate as enum
@@ -45,11 +46,14 @@ def test_discover_all_and_format(monkeypatch):
     monkeypatch.setattr(
         enum, "list_can_interfaces", lambda: {"can7": enum.CanInfo("can7", "up", None)}
     )
+    monkeypatch.setattr(RealSenseCamera, "discover", classmethod(lambda cls: {"RS123"}))
     report = enum.discover_all(["172.16.0.2"])
-    assert report.cameras["fake"] == {"FAKE0", "FAKE1"}
+    assert "fake" not in report.cameras
+    assert report.cameras["realsense"] == {"RS123"}
     assert report.hosts["172.16.0.2"] == enum.HostInfo("172.16.0.2", True, [1337])
     text = report.format()
-    assert "can7" in text and "172.16.0.2" in text and "FAKE0" in text
+    assert "can7" in text and "172.16.0.2" in text and "RS123" in text
+    assert "FAKE0" not in text and "fake" not in text
 
 
 def test_empty_report_formats_none_lines():

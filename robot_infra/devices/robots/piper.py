@@ -14,6 +14,7 @@ class PiperConfig(RobotConfig):
     arm_backend: str = "pyagxarm"
     can_interface: str = "can0"
     bitrate: int = 1_000_000
+    firmware_profile: str | None = None  # default|v183|v188|v189; None probes the arm
     gripper: GripperConfig | None = field(
         default_factory=lambda: GripperConfig(
             backend="pyagxarm", max_width_m=0.07, mode="continuous", shares_arm_session=True

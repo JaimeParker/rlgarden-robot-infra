@@ -28,6 +28,13 @@ sim = ["mani_skill"]
 real = ["flask", "pyzmq", "scipy", "pyspacemouse"]
 # devices/backends/cameras/realsense.py: Intel RealSense camera backend.
 realsense = ["pyrealsense2"]
+# devices/backends/{arms,grippers}/pyagxarm.py: AgileX Piper over CAN.
+pyagxarm = ["pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git"]
+# devices/backends/{arms,grippers}/franky.py: Franka arm + hand via franky. For a
+# non-default libfranka, install the wheel matching your robot server version instead (franky README).
+franky = ["franky-control"]
+# devices/backends/{arms,grippers}/piper_sdk.py: AgileX Piper over the vendor SDK.
+piper-sdk = ["piper_sdk"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]
