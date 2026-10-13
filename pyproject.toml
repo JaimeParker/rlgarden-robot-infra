@@ -12,6 +12,8 @@ dependencies = [
     "numpy",
     "gymnasium>=0.29",
     "tyro",
+    "filelock",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
