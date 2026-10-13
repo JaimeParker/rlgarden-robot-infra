@@ -57,7 +57,14 @@ def test_discover_all_and_format(monkeypatch):
 
 
 def test_empty_report_formats_none_lines():
-    assert enum.DiscoveryReport().format().count("none") == 4
+    assert enum.DiscoveryReport().format().count("none") == 5
+
+
+def test_discover_teleops_and_format():
+    assert enum.discover_teleops()["fake"] == {"fake"}
+    assert "fake" not in enum.discover_teleops(hardware_only=True)
+    text = enum.DiscoveryReport(teleops={"spacemouse": {"hid-0"}}).format()
+    assert "teleops:\n  spacemouse: hid-0" in text
 
 
 def test_camera_discover_exception_gives_empty_set(monkeypatch):

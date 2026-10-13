@@ -50,7 +50,8 @@ def connected(services) -> RobotService:
 
 def test_method_table_matches_spec(services):
     service = services()
-    assert set(service.methods) == (set(METHODS) - {"camera.<name>.read"}) | {"camera.wrist.read"}
+    templates = {"camera.<name>.read", "teleop.<name>.read", "teleop.<name>.reset"}
+    assert set(service.methods) == (set(METHODS) - templates) | {"camera.wrist.read"}
     with pytest.raises(ValueError, match=r"unknown method 'arm.fly'.*arm.servo_joints"):
         service.dispatch("arm.fly", {})
 
@@ -70,6 +71,8 @@ def test_describe(services):
             "tcp_torque",
         ],
         "control_mode": "idle",
+        "safety": None,
+        "home_joints": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
     }
     assert description["gripper"] == {"max_width_m": 0.08, "mode": "binary", "binary_threshold": 0.5}
     assert description["cameras"]["wrist"]["fps"] == 60
@@ -234,3 +237,73 @@ def test_close_disconnects_stops_watchdog_and_releases_claim(services):
     other = services()
     other.dispatch("robot.connect", {})
     assert other.robot.is_connected
+
+
+TELEOP_SCRIPT = [
+    {"action": [0.5, 0.0, 0.0, 0.0, 0.0, 0.0], "active": True, "buttons": {"left": True}},
+    {"events": {"episode_end": True}},
+]
+
+
+def teleop_robot(**teleop) -> FrankaRobot:
+    from robot_infra.devices import TeleopConfig
+
+    config = TeleopConfig(backend="fake", options={"script": TELEOP_SCRIPT}, **teleop)
+    return franka_robot(teleop=config)
+
+
+def test_teleop_methods_describe_and_health(services):
+    service = services(teleop_robot(hold_s=0.25))
+    assert {"teleop.teleop.read", "teleop.teleop.reset"} <= set(service.methods)
+    assert service.dispatch("robot.describe", {})["teleop"] == {
+        "name": "teleop",
+        "backend": "fake",
+        "action_space": "cartesian_delta",
+        "has_gripper": True,
+        "hold_s": 0.25,
+    }
+    service.dispatch("robot.connect", {})
+    sample = service.dispatch("teleop.teleop.read", {"timeout_s": 1.0})
+    assert sample.keys() == {
+        "action", "action_space", "gripper", "buttons", "events", "intervening", "timestamp", "seq"
+    }
+    assert sample["action"].dtype == np.float32 and sample["intervening"] is True
+    assert sample["buttons"] == {"left": True}
+    assert service.dispatch("teleop.teleop.read", {})["events"]["episode_end"] is True
+    service.dispatch("teleop.teleop.reset", {})
+    health = service.dispatch("robot.health", {})
+    assert health["teleop"]["ok"] is True and health["teleop"]["thread_alive"] is True
+    observation = service.dispatch("robot.get_observation", {})
+    assert observation["teleop"]["action"].shape == (6,)
+
+
+@pytest.mark.parametrize("requested, expected", [(1e9, 2.0), (None, 2.0), (-5.0, 0.0), (0.25, 0.25)])
+def test_teleop_read_timeout_is_clamped(services, monkeypatch, requested, expected):
+    from robot_infra.server.service import TELEOP_READ_MAX_TIMEOUT_S
+
+    assert TELEOP_READ_MAX_TIMEOUT_S == 2.0
+    service = services(teleop_robot())
+    service.dispatch("robot.connect", {})
+    seen = []
+    real_read = service.robot.teleop.read
+    monkeypatch.setattr(service.robot.teleop, "read", lambda timeout_s=None: seen.append(timeout_s) or real_read(1.0))
+    service.dispatch("teleop.teleop.read", {} if requested is None else {"timeout_s": requested})
+    assert seen == [expected]
+
+
+def test_no_teleop_means_no_teleop_methods(services):
+    service = services()
+    assert not any(method.startswith("teleop.") for method in service.methods)
+    assert service.dispatch("robot.describe", {})["teleop"] is None
+
+
+def test_teleop_read_does_not_feed_the_watchdog(services):
+    service = services(teleop_robot(), watchdog_s=0.1)
+    service.dispatch("robot.connect", {})
+    service.dispatch("arm.set_control_mode", {"mode": "joint_servo"})
+    service.dispatch("arm.servo_joints", {"q": np.ones(7)})
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        service.dispatch("teleop.teleop.read", {"timeout_s": 1.0})
+    assert service.watchdog_trips == 1
+    assert service.dispatch("arm.control_mode", {}) == "idle"

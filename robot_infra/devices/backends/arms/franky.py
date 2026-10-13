@@ -22,6 +22,7 @@ from robot_infra.devices.errors import (
     SdkMissing,
     VersionMismatch,
 )
+from robot_infra.devices.safety import ArmSafety
 
 if TYPE_CHECKING:
     from robot_infra.devices.robot import RobotConfig
@@ -100,8 +101,9 @@ class FrankyArm(Arm):
         relative_dynamics_factor: float = 0.2,
         realtime: str = "ignore",
         home_joints: list[float] | None = None,
+        safety: ArmSafety | None = None,
     ) -> None:
-        super().__init__(name, num_joints=7)
+        super().__init__(name, num_joints=7, safety=safety)
         if realtime not in ("ignore", "enforce"):
             raise ValueError(f"realtime '{realtime}' invalid; choose from ['ignore', 'enforce']")
         self.robot_ip = robot_ip
@@ -117,6 +119,7 @@ class FrankyArm(Arm):
             relative_dynamics_factor=config.relative_dynamics_factor,
             realtime=config.realtime,
             home_joints=config.home_joints,
+            safety=ArmSafety.from_config(config),
         )
 
     @classmethod
@@ -152,7 +155,7 @@ class FrankyArm(Arm):
 
     def read_state(self) -> dict[str, np.ndarray]:
         self._require_connected()
-        return self._read_state_from(self._handle.robot)
+        return self._remember_state(self._read_state_from(self._handle.robot))
 
     def _read_state_from(self, robot: Any) -> dict[str, np.ndarray]:
         franky = self.require_sdk()
@@ -177,22 +180,22 @@ class FrankyArm(Arm):
 
     # --- commands ---
 
-    def servo_cartesian(self, pose: np.ndarray) -> None:
+    def _servo_cartesian(self, pose: np.ndarray) -> None:
         tracker = self._live_tracker(ControlMode.CARTESIAN_SERVO)
         tracker.set_target(self._affine(pose))
 
-    def servo_joints(self, q: np.ndarray) -> None:
+    def _servo_joints(self, q: np.ndarray) -> None:
         tracker = self._live_tracker(ControlMode.JOINT_SERVO)
         tracker.set_target(self._checked(q, (self.num_joints,)))
 
-    def move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
         self._require_idle("move_to_pose")
         franky = self.require_sdk()
         motion = franky.CartesianMotion(self._affine(pose))
         with self._control_exceptions_as_faults("move_to_pose"):
             self._handle.robot.move(motion, asynchronous=not blocking)
 
-    def move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
         self._require_idle("move_to_joints")
         franky = self.require_sdk()
         target = self._checked(q, (self.num_joints,))

@@ -87,3 +87,10 @@ class DeviceFault(DeviceError):
 
 class VersionMismatch(DeviceError):
     kind = "version_mismatch"
+
+
+class SafetyViolation(DeviceError):
+    """A command outside the configured safety limits was refused. Not a device fault: the
+    arm is untouched and keeps its control mode."""
+
+    kind = "safety_violation"

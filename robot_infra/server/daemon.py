@@ -24,7 +24,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--token", default=None, help="shared secret clients must send")
     parser.add_argument("--no-preflight", action="store_true", help="skip the doctor before serving")
     parser.add_argument("--watchdog-s", type=float, default=0.5, help="idle a servoing arm after this long without actions")
-    parser.add_argument("--jpeg-quality", type=int, default=None, help="JPEG-encode camera frames at this quality")
+    parser.add_argument("--jpeg-quality", type=int, default=None, help="lossy-JPEG the color image of every camera frame at this quality (1-100); depth stays raw. "
+        "Train and deploy with the same value; default sends raw frames")
     parser.add_argument("--transport", choices=_TRANSPORT_NAMES, default="grpc")
     return parser.parse_args(argv)
 
@@ -57,9 +58,7 @@ def build_daemon(
     if not isinstance(args, argparse.Namespace):
         args = parse_args(args)
     config = load_daemon_config(args) if config is None else config
-    service = RobotService(Robot.from_config(config), watchdog_s=args.watchdog_s)
-    # TODO(transport): the codec does not JPEG-encode camera frames yet; transports should read this.
-    service.jpeg_quality = args.jpeg_quality
+    service = RobotService(Robot.from_config(config), watchdog_s=args.watchdog_s, jpeg_quality=args.jpeg_quality)
     return service, _make_transport(args.transport)
 
 

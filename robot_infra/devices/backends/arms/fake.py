@@ -8,6 +8,7 @@ import numpy as np
 from robot_infra.devices.arm import Arm, ControlMode
 from robot_infra.devices.base import Connection
 from robot_infra.devices.errors import DeviceFault
+from robot_infra.devices.safety import ArmSafety
 
 if TYPE_CHECKING:
     from robot_infra.devices.robot import RobotConfig
@@ -26,8 +27,9 @@ class FakeArm(Arm):
         num_joints: int = 7,
         alpha: float = 0.5,
         owner: Connection | None = None,
+        safety: ArmSafety | None = None,
     ) -> None:
-        super().__init__(name, num_joints=num_joints, owner=owner)
+        super().__init__(name, num_joints=num_joints, owner=owner, safety=safety)
         self._alpha = alpha
         self._joint_pos = np.zeros(num_joints)
         self._joint_vel = np.zeros(num_joints)
@@ -39,7 +41,7 @@ class FakeArm(Arm):
 
     @classmethod
     def from_config(cls, config: "RobotConfig", *, name: str = "arm") -> "FakeArm":
-        return cls(name, num_joints=config.NUM_JOINTS)
+        return cls(name, num_joints=config.NUM_JOINTS, safety=ArmSafety.from_config(config))
 
     def inject(self, fault: str | None) -> None:
         if fault not in _FAULTS:
@@ -56,37 +58,37 @@ class FakeArm(Arm):
             self._tcp_pose[3:] = self._pose_target[3:]
         if self._injected_fault != "no_feedback":
             self._note_feedback()
-        return {
+        return self._remember_state({
             "tcp_pose": self._tcp_pose.copy(),
             "tcp_vel": np.zeros(6),
             "joint_pos": self._joint_pos.copy(),
             "joint_vel": self._joint_vel.copy(),
             "tcp_force": np.zeros(3),
             "tcp_torque": np.zeros(3),
-        }
+        })
 
-    def servo_cartesian(self, pose: np.ndarray) -> None:
+    def _servo_cartesian(self, pose: np.ndarray) -> None:
         self.call_log.append("servo_cartesian")
         self._raise_if_faulted()
         pose = self._checked(pose, (7,))
         if self._injected_fault != "drop_commands":
             self._pose_target = pose
 
-    def servo_joints(self, q: np.ndarray) -> None:
+    def _servo_joints(self, q: np.ndarray) -> None:
         self.call_log.append("servo_joints")
         self._raise_if_faulted()
         q = self._checked(q, (self.num_joints,))
         if self._injected_fault != "drop_commands":
             self._joint_target = q
 
-    def move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
         self.call_log.append("move_to_pose")
         self._raise_if_faulted()
         self._pose_target = self._checked(pose, (7,))
         if blocking:
             self._tcp_pose = self._pose_target.copy()
 
-    def move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
         self.call_log.append("move_to_joints")
         self._raise_if_faulted()
         self._joint_target = self._checked(q, (self.num_joints,))

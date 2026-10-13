@@ -3,6 +3,8 @@ closure so ``fix`` can run its autofix and then re-run exactly that check."""
 from __future__ import annotations
 
 import dataclasses
+import glob
+import os
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -15,6 +17,7 @@ from robot_infra.devices import (
     Robot,
     RobotConfig,
     SdkMissing,
+    Teleop,
 )
 from robot_infra.devices.claims import DeviceClaim, claim_key
 from robot_infra.discovery import enumerate as probes
@@ -22,6 +25,7 @@ from robot_infra.discovery import enumerate as probes
 LAYER_NAMES = {1: "sdk", 2: "os", 3: "handshake", 4: "feedback", 5: "mode"}
 _FRANKA_FCI_PORT = 1337
 _CAMERA_READY_TIMEOUT_S = 2.0
+_HIDRAW_GLOB = "/dev/hidraw*"
 
 
 @dataclass
@@ -63,7 +67,15 @@ def _mocked(config: RobotConfig) -> RobotConfig:
         arm_backend="fake",
         gripper=dataclasses.replace(gripper, backend="fake") if gripper else None,
         cameras=[dataclasses.replace(camera, backend="fake") for camera in config.cameras],
+        teleop=_mocked_teleop(config.teleop),
     )
+
+
+def _mocked_teleop(teleop):
+    if teleop is None or teleop.backend == "fake":
+        return teleop
+    # Another backend's private options mean nothing to the fake.
+    return dataclasses.replace(teleop, backend="fake", options={})
 
 
 def _sdk_outcome(backend_cls: type) -> Outcome:
@@ -86,6 +98,10 @@ def _sdk_layer(config: RobotConfig) -> tuple[list[Check], bool]:
     for camera in config.cameras:
         targets.append(
             (f"sdk:camera:{camera.name}", lambda camera=camera: Camera.backend(camera.backend))
+        )
+    if config.teleop:
+        targets.append(
+            (f"sdk:teleop:{config.teleop.backend}", lambda: Teleop.backend(config.teleop.backend))
         )
     checks: list[Check] = []
     resolved = True
@@ -125,6 +141,14 @@ def _os_checks(config: RobotConfig) -> list[tuple[str, Check]]:
             checks.append((name, _no_device_check(name, camera.backend)))
         else:
             checks.append((name, _make_check(2, name, _camera_outcome(camera))))
+    if config.teleop:
+        name = f"os:teleop:{config.teleop.name}"
+        if _backend_needs_no_device(Teleop, config.teleop.backend):
+            checks.append((name, _no_device_check(name, config.teleop.backend)))
+        else:
+            checks.append((name, _make_check(2, name, _teleop_outcome(config.teleop))))
+        if config.teleop.backend == "spacemouse":
+            checks.append(("os:hid", _make_check(2, "os:hid", _hid_outcome())))
     return checks
 
 
@@ -206,6 +230,47 @@ def _camera_outcome(camera) -> Callable[[], Outcome]:
             f"camera '{camera.name}' serial '{camera.serial}' not found",
             f"set serial; discovered: {discovered}",
         )
+
+    return outcome
+
+
+def _teleop_outcome(teleop) -> Callable[[], Outcome]:
+    def outcome() -> Outcome:
+        discovered = sorted(Teleop.backend(teleop.backend).discover())
+        if discovered:
+            message = f"teleop '{teleop.name}' devices: {discovered}"
+        else:
+            message = f"no '{teleop.backend}' teleop device found"
+        return (
+            bool(discovered),
+            message,
+            "plug in the teleop device and run `python -m robot_infra.discovery`",
+        )
+
+    return outcome
+
+
+def _hid_outcome(pattern: str | None = None) -> Callable[[], Outcome]:
+    def outcome() -> Outcome:
+        paths = sorted(glob.glob(pattern or _HIDRAW_GLOB))
+        if not paths:
+            return (
+                False,
+                "no HID device found",
+                "no /dev/hidraw* node: check the USB cable and port; inside Docker pass it with "
+                "`docker run --device=/dev/hidrawN`",
+            )
+        denied = [path for path in paths if not os.access(path, os.R_OK | os.W_OK)]
+        if denied:
+            return (
+                False,
+                f"no read/write access to {denied}",
+                'add a udev rule `SUBSYSTEM=="hidraw", ATTRS{idVendor}=="256f", MODE="0666"` to '
+                "/etc/udev/rules.d/99-spacemouse.rules, then `sudo udevadm control --reload && "
+                "sudo udevadm trigger` and replug; inside Docker pass the node with "
+                "`docker run --device=/dev/hidrawN`",
+            )
+        return True, f"{len(paths)} HID device(s) readable and writable: {paths}"
 
     return outcome
 
@@ -295,6 +360,8 @@ def _feedback_and_mode_layers(robot: Robot, record, results: list[CheckResult], 
         record(_make_check(4, "feedback:gripper", lambda: (gripper.get_observation() is not None, "gripper readable")))
     for name, camera in robot.cameras.items():
         record(_camera_feedback_check(name, camera))
+    if robot.teleop is not None:
+        record(_make_check(4, f"feedback:teleop:{robot.teleop.name}", _teleop_feedback(robot.teleop)))
 
     try:
         mode_results = arm.preflight()
@@ -322,6 +389,20 @@ def _camera_feedback_check(name: str, camera: Camera) -> Check:
         )
 
     return run
+
+
+def _teleop_feedback(teleop: Teleop) -> Callable[[], Outcome]:
+    def outcome() -> Outcome:
+        health = teleop.health()
+        teleop.latest()
+        problem = health.detail or "poll thread not running"
+        return (
+            health.ok,
+            "teleop poll thread alive" if health.ok else f"teleop unhealthy: {problem}",
+            "check the teleop device cable and permissions, then reconnect",
+        )
+
+    return outcome
 
 
 def _preflight_rerun(arm: Arm, original: CheckResult) -> Check:

@@ -2,6 +2,8 @@
 from robot_infra.devices.backends.arms import fake as _fake_arm  # noqa: F401
 from robot_infra.devices.backends.cameras import fake as _fake_camera  # noqa: F401
 from robot_infra.devices.backends.grippers import fake as _fake_gripper  # noqa: F401
+from robot_infra.devices.backends.teleops import fake as _fake_teleop  # noqa: F401
+from robot_infra.devices.backends.teleops import spacemouse as _spacemouse_teleop  # noqa: F401  (SDK import is lazy)
 from robot_infra.devices.backends.cameras import realsense as _realsense_camera  # noqa: F401  (SDK import is lazy)
 from robot_infra.devices.backends.arms import franky as _franky_arm  # noqa: F401  (SDK import is lazy)
 from robot_infra.devices.backends.grippers import franky as _franky_gripper  # noqa: F401

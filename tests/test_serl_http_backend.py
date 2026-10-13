@@ -181,7 +181,7 @@ def test_joint_control_not_implemented(arm):
 
 def test_servo_cartesian_requires_mode(arm):
     with pytest.raises(DeviceFault):
-        arm.servo_cartesian(np.zeros(7))
+        arm.servo_cartesian(np.array([0.45, 0.05, 0.25, 1.0, 0.0, 0.0, 0.0]))
 
 
 def test_move_to_joints_home_resets_via_bridge(arm, bridge):

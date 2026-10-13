@@ -3,7 +3,7 @@ the remote ``robot.describe`` and forwards every device call through a ``Transpo
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -14,6 +14,13 @@ from robot_infra.devices.camera import CameraConfig, Frame
 from robot_infra.devices.errors import DeviceError
 from robot_infra.devices.gripper import Gripper, GripperMode
 from robot_infra.devices.robot import GripperConfig, Robot, RobotConfig
+from robot_infra.devices.teleop import (
+    TeleopHealth,
+    TeleopSample,
+    teleop_observation,
+    teleop_observation_features,
+)
+from robot_infra.server.codec import require_jpeg_decoder
 from robot_infra.server.transport.base import TransportClient
 
 if TYPE_CHECKING:
@@ -27,7 +34,8 @@ _DEFAULT_BINARY_THRESHOLD = 0.5
 
 @dataclass
 class RemoteRobotConfig(RobotConfig):
-    """``arm_backend``/``gripper``/``cameras``/``home_joints`` are ignored: the parts come
+    """``arm_backend``/``gripper``/``cameras``/``home_joints`` (and the daemon-side
+    ``joint_limits``/``max_delta_per_step``/``teleop``/``safety_box``) are ignored: the parts come
     from the daemon's ``robot.describe``."""
 
     TYPE = "remote"
@@ -47,6 +55,12 @@ class RemoteRobotConfig(RobotConfig):
             raise ValueError(f"transport '{self.transport}' invalid; choose from {list(_TRANSPORTS)}")
         if self.timeout_s <= 0:
             raise ValueError(f"timeout_s must be positive, got {self.timeout_s}")
+
+
+def _rebuild(cls: type, data: dict) -> Any:
+    """``cls(**data)`` keeping only known fields, so an older client tolerates a newer daemon's extra keys."""
+    known = {field.name for field in fields(cls)}
+    return cls(**{key: value for key, value in data.items() if key in known})
 
 
 class _RemotePart:
@@ -79,26 +93,39 @@ class RemoteArm(_RemotePart, Arm):
         client: TransportClient,
         owner: Connection,
         control_mode: ControlMode = ControlMode.IDLE,
+        safety_limits: dict | None = None,
+        home_joints: list[float] | None = None,
     ) -> None:
-        super().__init__(name, num_joints=num_joints, owner=owner)
+        # No local guard: the daemon's arm enforces the limits, this side only sanitizes.
+        super().__init__(name, num_joints=num_joints, owner=owner, safety=None)
         # Instance attribute shadows the Arm ClassVar: the field set is only known per remote robot.
         self.SUPPORTED_STATE_FIELDS = tuple(supported_state_fields)
         self._client = client
         self._control_mode = control_mode
+        self._remote_safety_limits = safety_limits
+        self._home_joints = None if home_joints is None else list(home_joints)
+
+    @property
+    def safety_limits(self) -> dict | None:
+        return self._remote_safety_limits
+
+    @property
+    def home_joints(self) -> list[float] | None:
+        return self._home_joints
 
     def read_state(self) -> dict[str, np.ndarray]:
         return self._call("read_state")
 
-    def servo_cartesian(self, pose: np.ndarray) -> None:
+    def _servo_cartesian(self, pose: np.ndarray) -> None:
         self._call("servo_cartesian", pose=np.asarray(pose))
 
-    def servo_joints(self, q: np.ndarray) -> None:
+    def _servo_joints(self, q: np.ndarray) -> None:
         self._call("servo_joints", q=np.asarray(q))
 
-    def move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
         self._call("move_to_pose", pose=np.asarray(pose), blocking=blocking)
 
-    def move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
         self._call("move_to_joints", q=np.asarray(q), blocking=blocking)
 
     def stop(self) -> None:
@@ -119,7 +146,7 @@ class RemoteArm(_RemotePart, Arm):
     def health(self) -> ArmHealth:
         if not self.is_connected:
             return ArmHealth(ok=False, detail="not connected", control_mode=self._control_mode.value)
-        health = ArmHealth(**self._call("health"))
+        health = _rebuild(ArmHealth, self._call("health"))
         self._control_mode = ControlMode(health.control_mode)
         return health
 
@@ -169,9 +196,17 @@ class RemoteCamera(_RemotePart, Part):
     ``@final`` ``_open``/``_release`` and never borrows a session, while frames here come from
     the daemon's capture thread one ``camera.<name>.read`` call at a time."""
 
-    def __init__(self, config: CameraConfig, *, client: TransportClient, owner: Connection) -> None:
+    def __init__(
+        self,
+        config: CameraConfig,
+        *,
+        client: TransportClient,
+        owner: Connection,
+        image_encoding: dict | None = None,
+    ) -> None:
         super().__init__(config.name, owner=owner)
         self._config = config
+        self._image_encoding = image_encoding
         self._client = client
         self._method_prefix = f"camera.{config.name}"
         self._latest: Frame | None = None
@@ -179,6 +214,11 @@ class RemoteCamera(_RemotePart, Part):
     @property
     def config(self) -> CameraConfig:
         return self._config
+
+    @property
+    def image_encoding(self) -> dict | None:
+        """Daemon-reported lossy encoding of ``color`` (``{"jpeg": quality}``), None when raw."""
+        return self._image_encoding
 
     @property
     def observation_features(self) -> Features:
@@ -214,7 +254,58 @@ class RemoteCamera(_RemotePart, Part):
     def health(self) -> Health:
         if not self.is_connected:
             return Health(ok=False, detail="not connected")
-        return Health(**self._client.call("robot.health")["cameras"][self.name])
+        return _rebuild(Health, self._client.call("robot.health")["cameras"][self.name])
+
+
+class RemoteTeleop(_RemotePart, Part):
+    """Teleop-shaped ``Part``, not a ``Teleop``: ``Teleop`` owns a poll thread through
+    ``@final`` ``_open``/``_release``, while samples here come from the daemon's poll thread one
+    ``teleop.<name>.read`` call at a time. Single consumer, as on the daemon side."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        action_space: str,
+        has_gripper: bool,
+        action_dim: int,
+        hold_s: float,
+        client: TransportClient,
+        owner: Connection,
+    ) -> None:
+        super().__init__(name, owner=owner)
+        self.action_space = action_space
+        self.has_gripper = has_gripper
+        self.action_dim = action_dim
+        self.hold_s = hold_s
+        self._client = client
+        self._method_prefix = f"teleop.{name}"
+        self._latest: TeleopSample | None = None
+
+    @property
+    def observation_features(self) -> Features:
+        return teleop_observation_features(self.action_dim, self.has_gripper)
+
+    def get_observation(self) -> dict[str, np.ndarray]:
+        """ndarray form of the last sample this client read; no round trip, no event consumption."""
+        self._require_connected()
+        return teleop_observation(self._latest, self.action_dim, self.has_gripper)
+
+    def read(self, timeout_s: float | None = None) -> TeleopSample:
+        self._latest = TeleopSample.from_dict(self._call("read", timeout_s=timeout_s))
+        return self._latest
+
+    def latest(self) -> TeleopSample | None:
+        """Last sample this client read (events as they were then); no round trip."""
+        return self._latest
+
+    def reset(self) -> None:
+        self._call("reset")
+
+    def health(self) -> TeleopHealth:
+        if not self.is_connected:
+            return TeleopHealth(ok=False, detail="not connected")
+        return _rebuild(TeleopHealth, self._client.call("robot.health")["teleop"])
 
 
 @Robot.register_type
@@ -284,6 +375,9 @@ class RemoteRobot(Robot):
         return info
 
     def _build_remote_parts(self, info: dict, client: TransportClient) -> None:
+        image_encoding = info.get("image_encoding")  # absent from daemons that predate JPEG
+        if image_encoding:
+            require_jpeg_decoder()
         arm_info = info["arm"]
         self.add(
             "arm",
@@ -294,6 +388,8 @@ class RemoteRobot(Robot):
                 client=client,
                 owner=self,
                 control_mode=ControlMode(arm_info["control_mode"]),
+                safety_limits=arm_info.get("safety"),
+                home_joints=arm_info.get("home_joints"),
             ),
         )
         gripper_info = info["gripper"]
@@ -312,9 +408,29 @@ class RemoteRobot(Robot):
             )
         if info["cameras"]:
             group = PartGroup("cameras")
-            for name, camera_cfg in info["cameras"].items():
-                group.add(name, RemoteCamera(CameraConfig(**camera_cfg), client=client, owner=self))
+            for name, camera_info in info["cameras"].items():
+                group.add(
+                    name,
+                    RemoteCamera(
+                        CameraConfig(**camera_info), client=client, owner=self, image_encoding=image_encoding
+                    ),
+                )
             self.add("cameras", group)
+        teleop_info = info.get("teleop")  # absent from daemons that predate teleop
+        if teleop_info:
+            part_info = info["describe"]["children"]["teleop"]
+            self.add(
+                "teleop",
+                RemoteTeleop(
+                    teleop_info["name"],
+                    action_space=teleop_info["action_space"],
+                    has_gripper=teleop_info["has_gripper"],
+                    action_dim=part_info["action_dim"],
+                    hold_s=teleop_info["hold_s"],
+                    client=client,
+                    owner=self,
+                ),
+            )
 
     def _release(self, handle: Any) -> None:
         client = self._client
@@ -331,6 +447,10 @@ class RemoteRobot(Robot):
     @property
     def cameras(self) -> dict[str, RemoteCamera]:
         return super().cameras
+
+    @property
+    def teleop(self) -> RemoteTeleop | None:
+        return self.children.get("teleop")
 
     def describe_text(self) -> str:
         if not self.is_connected:

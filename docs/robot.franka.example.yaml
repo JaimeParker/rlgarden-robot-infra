@@ -8,7 +8,18 @@ robot_ip: 172.16.0.2          # FCI IP set in Desk (default 172.16.0.2)
 realtime: ignore              # ignore (default) | enforce: enforce needs a PREEMPT_RT kernel
 relative_dynamics_factor: 0.2 # franky velocity/acc/jerk scale for move_to_* (default 0.2)
 home_joints: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]  # 7 values (default shown)
-# safety_box: [xmin, ymin, zmin, xmax, ymax, zmax]          # validated (6 values), not enforced yet
+# Safety limits, enforced by the arm (and so by the daemon): servo targets are clipped,
+# move_to_* targets outside them are refused with SafetyViolation. Omit a key for no limit.
+# safety_box: [0.3, -0.3, 0.05, 0.7, 0.3, 0.6]  # [xmin, ymin, zmin, xmax, ymax, zmax] m, base frame (tcp_pose = O_T_EE)
+# joint_limits:                 # 7 [lo, hi] pairs, rad; home_joints must lie inside
+#   - [-2.8, 2.8]
+#   - [-1.7, 1.7]
+#   - [-2.8, 2.8]
+#   - [-3.0, -0.1]
+#   - [-2.8, 2.8]
+#   - [0.0, 3.7]
+#   - [-2.8, 2.8]
+# max_delta_per_step: {xyz_m: 0.05, joint_rad: 0.1}  # servo step cap from the measured state
 claim: true                   # daemon takes an exclusive per-host lock on this robot (default true)
 gripper:                      # null for no gripper
   backend: franky             # franky (default) | serl_http | fake
@@ -24,3 +35,12 @@ cameras:                      # default: no cameras
     height: 480
     fps: 30
     enable_depth: false
+# teleop:                       # default: no teleop; when set, the device must be present at connect
+#   name: teleop                # daemon serves teleop.<name>.read / teleop.<name>.reset
+#   backend: fake               # fake | spacemouse
+#   hold_s: 0.0                 # keep intervening this long after the last activity (default 0)
+#   options:                    # backend-private; fake: action_space, has_gripper, num_joints,
+#     on_end: hold_last         #   script, on_end (hold_last | idle | loop), fail_after
+#     script:
+#       - {action: [0.5, 0, 0, 0, 0, 0], active: true, hold: 3}
+#       - {action: [0, 0, 0, 0, 0, 0], gripper: 0.0, events: {episode_end: true}}

@@ -1,4 +1,4 @@
-"""Robot composition: a typed config plus a PartGroup of arm, gripper and cameras."""
+"""Robot composition: a typed config plus a PartGroup of arm, gripper, cameras and an optional teleop."""
 from __future__ import annotations
 
 import dataclasses
@@ -13,8 +13,10 @@ from robot_infra.devices.arm import Arm
 from robot_infra.devices.base import PartGroup
 from robot_infra.devices.camera import Camera, CameraConfig
 from robot_infra.devices.gripper import Gripper, GripperMode
+from robot_infra.devices.teleop import Teleop, TeleopConfig
 
 _SAFETY_BOX_LENGTH = 6
+_MAX_DELTA_KEYS = ("xyz_m", "joint_rad")
 
 
 def _check_known_keys(config_cls: type, data: Mapping[str, Any], known: set[str]) -> None:
@@ -48,8 +50,13 @@ class RobotConfig:
     gripper: GripperConfig | None = field(default_factory=GripperConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
     home_joints: list[float] | None = None
+    # Base frame, same definition as read_state()["tcp_pose"]: servo targets are clipped
+    # into it, move_to_* targets outside it are refused.
     safety_box: list[float] | None = None
+    joint_limits: list[list[float]] | None = None  # (NUM_JOINTS, 2) [lo, hi] in rad
+    max_delta_per_step: dict | None = None  # {"xyz_m": float, "joint_rad": float}, servo only
     claim: bool = True
+    teleop: TeleopConfig | None = None
 
     def __post_init__(self) -> None:
         if self.home_joints is not None and len(self.home_joints) != self.NUM_JOINTS:
@@ -61,10 +68,45 @@ class RobotConfig:
                 "safety_box must be [xmin, ymin, zmin, xmax, ymax, zmax], "
                 f"got {len(self.safety_box)} entries"
             )
+        if self.safety_box is not None:
+            for axis, low, high in zip("xyz", self.safety_box[:3], self.safety_box[3:]):
+                if low > high:
+                    raise ValueError(f"safety_box {axis}min {low} > {axis}max {high}")
+        self._check_joint_limits()
+        self._check_max_delta_per_step()
         if self.gripper is not None:
             modes = [m.value for m in GripperMode]
             if self.gripper.mode not in modes:
                 raise ValueError(f"gripper mode '{self.gripper.mode}' invalid; choose from {modes}")
+
+    def _check_joint_limits(self) -> None:
+        if self.joint_limits is None:
+            return
+        rows = len(self.joint_limits)
+        if rows != self.NUM_JOINTS or any(len(row) != 2 for row in self.joint_limits):
+            raise ValueError(
+                f"joint_limits must be {self.NUM_JOINTS} [lo, hi] pairs, got {self.joint_limits}"
+            )
+        for i, (low, high) in enumerate(self.joint_limits):
+            if low > high:
+                raise ValueError(f"joint_limits[{i}] lo {low} > hi {high}")
+        if self.home_joints is not None:
+            for i, (value, (low, high)) in enumerate(zip(self.home_joints, self.joint_limits)):
+                if not low <= value <= high:
+                    raise ValueError(
+                        f"home_joints[{i}] = {value} is outside joint_limits[{i}] = [{low}, {high}]"
+                    )
+
+    def _check_max_delta_per_step(self) -> None:
+        if self.max_delta_per_step is None:
+            return
+        for key, value in self.max_delta_per_step.items():
+            if key not in _MAX_DELTA_KEYS:
+                raise ValueError(
+                    f"unknown max_delta_per_step key '{key}'; known: {list(_MAX_DELTA_KEYS)}"
+                )
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+                raise ValueError(f"max_delta_per_step.{key} must be a positive number, got {value!r}")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RobotConfig":
@@ -77,6 +119,8 @@ class RobotConfig:
             for camera in values["cameras"]:
                 _check_known_keys(CameraConfig, camera, camera_keys)
             values["cameras"] = [CameraConfig(**camera) for camera in values["cameras"]]
+        if values.get("teleop") is not None:
+            values["teleop"] = TeleopConfig.from_dict(values["teleop"])
         return cls(**values)
 
     def to_dict(self) -> dict:
@@ -159,6 +203,10 @@ class Robot(PartGroup, ABC):
         group = self.children.get("cameras")
         return dict(group.children) if group is not None else {}
 
+    @property
+    def teleop(self) -> Teleop | None:
+        return self.children.get("teleop")
+
     def describe(self) -> dict:
         return {**super().describe(), "type": self.ROBOT_TYPE}
 
@@ -190,3 +238,7 @@ class Robot(PartGroup, ABC):
             for camera_cfg in cfg.cameras:
                 group.add(camera_cfg.name, Camera.backend(camera_cfg.backend)(camera_cfg))
             self.add("cameras", group)
+        if cfg.teleop is not None:
+            # Added last so it disconnects first and never delays releasing the arm.
+            teleop_cls = Teleop.backend(cfg.teleop.backend)
+            self.add("teleop", teleop_cls(cfg.teleop, owner=None))

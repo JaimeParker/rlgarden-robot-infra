@@ -16,6 +16,7 @@ import numpy as np
 from robot_infra.devices.arm import Arm, ArmHealth, ControlMode
 from robot_infra.devices.backends.arms._rotations import quat_xyzw_to_rpy, rpy_to_quat_xyzw
 from robot_infra.devices.errors import DeviceFault, DeviceNotFound, SdkMissing
+from robot_infra.devices.safety import ArmSafety
 
 if TYPE_CHECKING:
     from robot_infra.devices.robot import RobotConfig
@@ -86,13 +87,14 @@ class AgxArm(Arm):
         firmware_profile: str | None = None,
         home_joints: list[float] | None = None,
         with_gripper: bool = False,
+        safety: ArmSafety | None = None,
     ) -> None:
         if firmware_profile is not None and firmware_profile not in FIRMWARE_PROFILES:
             raise ValueError(
                 f"unknown Piper firmware_profile '{firmware_profile}'; "
                 f"choose from {list(FIRMWARE_PROFILES)} or None to auto-detect"
             )
-        super().__init__(name, num_joints=PIPER_NUM_JOINTS)
+        super().__init__(name, num_joints=PIPER_NUM_JOINTS, safety=safety)
         self.can_interface = can_interface
         self.bitrate = bitrate
         self.firmware_profile = firmware_profile
@@ -115,6 +117,7 @@ class AgxArm(Arm):
             firmware_profile=config.firmware_profile,
             home_joints=config.home_joints,
             with_gripper=gripper is not None and gripper.shares_arm_session,
+            safety=ArmSafety.from_config(config),
         )
 
     @property
@@ -329,11 +332,11 @@ class AgxArm(Arm):
             self._joint_stamp_changed_at = time.monotonic()
             self._note_feedback()
         pose6 = np.asarray(flange.msg, dtype=np.float64)
-        return {
+        return self._remember_state({
             "tcp_pose": np.concatenate([pose6[:3], rpy_to_quat_xyzw(pose6[3:])]),
             "joint_pos": np.asarray(joints.msg, dtype=np.float64),
             "joint_vel": joint_vel,
-        }
+        })
 
     # ------------------------------------------------------------------ commands
 
@@ -359,13 +362,13 @@ class AgxArm(Arm):
             raise ValueError(f"joint target must have shape ({PIPER_NUM_JOINTS},), got {q.shape}")
         return [float(v) for v in q]
 
-    def servo_cartesian(self, pose: np.ndarray) -> None:
+    def _servo_cartesian(self, pose: np.ndarray) -> None:
         self._require_connected()
         self._require_mode(ControlMode.CARTESIAN_SERVO, "servo_cartesian")
         self._require_servo_ready("servo_cartesian")
         self._handle.move_p(self._pose6(pose))
 
-    def servo_joints(self, q: np.ndarray) -> None:
+    def _servo_joints(self, q: np.ndarray) -> None:
         self._require_connected()
         self._require_mode(ControlMode.JOINT_SERVO, "servo_joints")
         self._require_servo_ready("servo_joints")
@@ -388,12 +391,12 @@ class AgxArm(Arm):
             )
         self._fresh_joint_angles(driver)
 
-    def move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
         self._require_connected()
         self._require_mode(ControlMode.IDLE, "move_to_pose")
         self._move_and_wait(lambda: self._handle.move_p(self._pose6(pose)), blocking)
 
-    def move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
         self._require_connected()
         self._require_mode(ControlMode.IDLE, "move_to_joints")
         self._move_and_wait(lambda: self._handle.move_j(self._joints(q)), blocking)

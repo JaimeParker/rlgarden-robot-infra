@@ -17,6 +17,7 @@ import numpy as np
 from robot_infra.devices.arm import Arm, ArmHealth, ControlMode
 from robot_infra.devices.backends.arms._rotations import quat_xyzw_to_rpy, rpy_to_quat_xyzw
 from robot_infra.devices.errors import DeviceFault, DeviceNotFound
+from robot_infra.devices.safety import ArmSafety
 from robot_infra.discovery.enumerate import list_can_interfaces
 
 if TYPE_CHECKING:
@@ -88,8 +89,9 @@ class PiperSdkArm(Arm):
         bitrate: int = 1_000_000,
         home_joints: list[float] | None = None,
         move_speed_percent: int = 30,
+        safety: ArmSafety | None = None,
     ) -> None:
-        super().__init__(name, num_joints=NUM_JOINTS)
+        super().__init__(name, num_joints=NUM_JOINTS, safety=safety)
         self._can_interface = can_interface
         self._bitrate = bitrate
         self._home_joints = home_joints
@@ -105,6 +107,7 @@ class PiperSdkArm(Arm):
             can_interface=config.can_interface,
             bitrate=config.bitrate,
             home_joints=config.home_joints,
+            safety=ArmSafety.from_config(config),
         )
 
     # -- lifecycle -------------------------------------------------------------------
@@ -240,11 +243,11 @@ class PiperSdkArm(Arm):
             )
             * _MILLI_PER_UNIT
         )
-        return {
+        return self._remember_state({
             "tcp_pose": np.concatenate([position, rpy_to_quat_xyzw(rpy)]),
             "joint_pos": joint_pos,
             "joint_vel": joint_vel,
-        }
+        })
 
     def _check_fresh(self, joint_msgs: Any) -> None:
         """Fault when no joint frame ever arrived, or its timestamp stopped advancing.
@@ -271,14 +274,14 @@ class PiperSdkArm(Arm):
 
     # -- commands --------------------------------------------------------------------
 
-    def servo_cartesian(self, pose: np.ndarray) -> None:
+    def _servo_cartesian(self, pose: np.ndarray) -> None:
         self._require_connected()
         self._require_mode(ControlMode.CARTESIAN_SERVO, "servo_cartesian")
         pose = self._checked(pose, (7,))
         self._require_servo_ready("servo_cartesian")
         self._send_pose(self._handle, pose)
 
-    def servo_joints(self, q: np.ndarray) -> None:
+    def _servo_joints(self, q: np.ndarray) -> None:
         self._require_connected()
         self._require_mode(ControlMode.JOINT_SERVO, "servo_joints")
         q = self._checked(q, (NUM_JOINTS,))
@@ -298,13 +301,13 @@ class PiperSdkArm(Arm):
             )
         self._check_fresh(self._handle.GetArmJointMsgs())
 
-    def move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
         self._require_connected()
         self._require_mode(ControlMode.IDLE, "move_to_pose")
         pose = self._checked(pose, (7,))
         self._move(lambda: self._send_pose(self._handle, pose), blocking)
 
-    def move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
         self._require_connected()
         self._require_mode(ControlMode.IDLE, "move_to_joints")
         q = self._checked(q, (NUM_JOINTS,))

@@ -24,3 +24,12 @@ def test_default_backends_build_without_sdk_or_hardware(robot_type):
     if robot.gripper is not None:
         assert not robot.gripper.is_connected
     assert robot.describe_text()
+
+
+def test_teleop_backends_registered_and_buildable_without_sdk():
+    from robot_infra.devices import Teleop
+
+    assert "fake" in Teleop.backends()
+    robot = Robot.from_dict({"type": "piper", "teleop": {"backend": "fake"}})
+    assert robot.teleop is not None and not robot.teleop.is_connected
+    assert list(robot.children)[-1] == "teleop"

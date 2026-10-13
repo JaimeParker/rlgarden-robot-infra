@@ -101,13 +101,22 @@ def _decode_jpeg(data: bytes) -> np.ndarray:
     return np.ascontiguousarray(bgr[..., ::-1])
 
 
+def require_jpeg_decoder() -> None:
+    """Fail fast with the install hint: a decode error inside a gRPC response deserializer
+    surfaces as an opaque INTERNAL TransportError."""
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        _import_cv2()
+
+
 def _import_cv2():
     try:
         import cv2
     except ImportError:
         raise SdkMissing(
             "JPEG frames need Pillow or OpenCV",
-            hint="pip install pillow",
+            hint='pip install "rlgarden-robot-infra[jpeg]"',
             device="codec",
         ) from None
     return cv2

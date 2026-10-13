@@ -41,8 +41,8 @@ def daemon():
     services: list[RobotService] = []
     remotes: list[RemoteRobot] = []
 
-    def start(*, watchdog_s: float = 0.5, token: str | None = None, port: int = 0):
-        service = RobotService(franka_robot(), watchdog_s=watchdog_s)
+    def start(*, watchdog_s: float = 0.5, token: str | None = None, port: int = 0, robot=None):
+        service = RobotService(robot or franka_robot(), watchdog_s=watchdog_s)
         transport = GrpcTransport()
         transport.start(service, f"127.0.0.1:{port}", token=token)
         services.append(service)
@@ -175,3 +175,43 @@ def test_device_claim_over_the_wire(daemon):
     first.disconnect()
     second.connect()
     assert second.is_connected
+
+
+def test_teleop_over_the_wire(daemon):
+    from robot_infra.devices import TeleopConfig, TeleopSample
+
+    script = [
+        {"action": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0], "active": True, "buttons": {"right": True}},
+        {"events": {"episode_end": True}},
+    ]
+    teleop_robot = FrankaRobot(
+        FrankaConfig(
+            arm_backend="fake",
+            gripper=GripperConfig(backend="fake"),
+            teleop=TeleopConfig(backend="fake", options={"script": script}),
+        )
+    )
+    _, transport = daemon(watchdog_s=30.0, robot=teleop_robot)
+    robot = daemon.remote(transport.port)
+    robot.connect()
+    teleop = robot.teleop
+    assert teleop.action_space == "cartesian_delta" and teleop.has_gripper is True
+    sample = teleop.read(timeout_s=1.0)
+    assert isinstance(sample, TeleopSample)
+    assert sample.action.dtype == np.float32 and sample.action.shape == (6,)
+    np.testing.assert_allclose(sample.action, [0.1, 0.2, 0.3, 0, 0, 0], atol=1e-6)
+    assert sample.intervening is True and sample.buttons == {"right": True}
+    assert isinstance(sample.gripper, float) and isinstance(sample.seq, int)
+    ended = teleop.read()
+    assert ended.events["episode_end"] is True and ended.intervening is False
+    assert teleop.read().events["episode_end"] is False
+    assert teleop.health().ok
+    robot.disconnect()
+
+
+def test_no_teleop_over_the_wire(daemon):
+    _, transport = daemon()
+    robot = daemon.remote(transport.port)
+    robot.connect()
+    assert robot.teleop is None
+    robot.disconnect()

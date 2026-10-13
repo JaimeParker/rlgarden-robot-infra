@@ -75,6 +75,20 @@ def test_jpeg_quality_stored_on_service(config_path, stub_transport):
     assert service.jpeg_quality == 80
 
 
+def test_jpeg_quality_reaches_service_constructor(config_path, stub_transport, monkeypatch):
+    received = {}
+    real_service = daemon.RobotService
+
+    def spy(robot, **kwargs):
+        received.update(kwargs)
+        return real_service(robot, **kwargs)
+
+    monkeypatch.setattr(daemon, "RobotService", spy)
+    service, _ = daemon.build_daemon(["--config", config_path, "--no-preflight", "--jpeg-quality", "80"])
+    service.close()
+    assert received["jpeg_quality"] == 80
+
+
 def test_build_daemon_with_grpc_transport(config_path):
     grpc_transport = pytest.importorskip("robot_infra.server.transport.grpc_transport")
     service, transport = daemon.build_daemon(["--config", config_path, "--no-preflight", "--bind", "127.0.0.1:0"])

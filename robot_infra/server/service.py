@@ -13,13 +13,17 @@ import numpy as np
 from robot_infra.devices.arm import ControlMode
 from robot_infra.devices.base import PartGroup
 from robot_infra.devices.claims import DeviceClaim, claim_key
-from robot_infra.devices.errors import DeviceFault, DeviceNotFound
+from robot_infra.devices.errors import DeviceFault, DeviceNotFound, SdkMissing
 from robot_infra.devices.gripper import Gripper
 from robot_infra.devices.robot import Robot
+from robot_infra.server.codec import encode_jpeg
 
 logger = logging.getLogger(__name__)
 
 CAMERA_READ_METHOD = "camera.<name>.read"
+TELEOP_READ_METHOD = "teleop.<name>.read"
+TELEOP_RESET_METHOD = "teleop.<name>.reset"
+TELEOP_READ_MAX_TIMEOUT_S = 2.0  # a client cannot park a gRPC worker thread longer than this
 METHODS = (
     "robot.describe",
     "robot.connect",
@@ -44,14 +48,44 @@ METHODS = (
     "gripper.move",
     "gripper.width",
     CAMERA_READ_METHOD,
+    TELEOP_READ_METHOD,
+    TELEOP_RESET_METHOD,
 )
 _WATCHDOG_JOIN_TIMEOUT_S = 2.0
 
 
+def _require_jpeg_backend() -> None:
+    try:
+        import PIL  # noqa: F401
+        return
+    except ImportError:
+        pass
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        raise SdkMissing(
+            "--jpeg-quality needs Pillow or OpenCV",
+            hint='pip install "rlgarden-robot-infra[jpeg]"',
+            device="codec",
+        ) from None
+
+
 class RobotService:
-    def __init__(self, robot: Robot, *, watchdog_s: float = 0.5, claim: bool | None = None) -> None:
+    def __init__(
+        self,
+        robot: Robot,
+        *,
+        watchdog_s: float = 0.5,
+        claim: bool | None = None,
+        jpeg_quality: int | None = None,
+    ) -> None:
         if watchdog_s <= 0:
             raise ValueError(f"watchdog_s must be positive, got {watchdog_s}")
+        if jpeg_quality is not None:
+            if not 1 <= jpeg_quality <= 100:
+                raise ValueError(f"jpeg_quality must be in [1, 100], got {jpeg_quality}")
+            _require_jpeg_backend()
+        self.jpeg_quality = jpeg_quality
         self.robot = robot
         self.watchdog_s = watchdog_s
         self._use_claim = robot.config.claim if claim is None else claim
@@ -91,6 +125,9 @@ class RobotService:
         }
         for name in robot.cameras:
             self._methods[f"camera.{name}.read"] = self._camera_reader(name)
+        if robot.teleop is not None:
+            self._methods[f"teleop.{robot.teleop.name}.read"] = self._teleop_read
+            self._methods[f"teleop.{robot.teleop.name}.reset"] = self._teleop_reset
 
     @property
     def methods(self) -> list[str]:
@@ -131,6 +168,8 @@ class RobotService:
                 "num_joints": arm.num_joints,
                 "supported_state_fields": list(arm.SUPPORTED_STATE_FIELDS),
                 "control_mode": arm.control_mode.value,
+                "safety": arm.safety_limits,
+                "home_joints": robot.config.home_joints,
             },
             "gripper": None
             if gripper is None
@@ -139,9 +178,22 @@ class RobotService:
                 "mode": gripper.mode.value,
                 "binary_threshold": gripper_config.binary_threshold if gripper_config else None,
             },
-            "cameras": {
-                name: dataclasses.asdict(camera.config) for name, camera in robot.cameras.items()
-            },
+            "cameras": {name: dataclasses.asdict(camera.config) for name, camera in robot.cameras.items()},
+            # Daemon-global, kept out of the per-camera dicts: older clients unpack those as CameraConfig.
+            "image_encoding": self._image_encoding(),
+            "teleop": self._describe_teleop(),
+        }
+
+    def _describe_teleop(self) -> dict | None:
+        teleop = self.robot.teleop
+        if teleop is None:
+            return None
+        return {
+            "name": teleop.name,
+            "backend": teleop.config.backend,
+            "action_space": teleop.ACTION_SPACE,
+            "has_gripper": teleop.HAS_GRIPPER,
+            "hold_s": teleop.config.hold_s,
         }
 
     def _connect(self) -> None:
@@ -177,7 +229,7 @@ class RobotService:
         }
 
     def _get_observation(self) -> dict:
-        return self.robot.get_observation()
+        return self._wire_observation(self.robot.get_observation())
 
     def _send_action(self, action: dict) -> None:
         with self._lock:
@@ -187,7 +239,7 @@ class RobotService:
 
     def _step(self, action: dict) -> dict:
         self._send_action(action)
-        return self.robot.get_observation()
+        return self._wire_observation(self.robot.get_observation())
 
     # -- arm.* ---------------------------------------------------------------
 
@@ -286,9 +338,37 @@ class RobotService:
     def _camera_reader(self, name: str) -> Callable[..., dict]:
         def read(timeout_s: float | None = None) -> dict:
             frame = self.robot.cameras[name].read(timeout_s)
-            return {"color": frame.color, "depth": frame.depth, "timestamp": frame.timestamp}
+            return {"color": self._wire_color(frame.color), "depth": frame.depth, "timestamp": frame.timestamp}
 
         return read
+
+    def _image_encoding(self) -> dict | None:
+        return None if self.jpeg_quality is None else {"jpeg": self.jpeg_quality}
+
+    def _wire_color(self, color: np.ndarray) -> Any:
+        return color if self.jpeg_quality is None else encode_jpeg(color, self.jpeg_quality)
+
+    def _wire_observation(self, observation: dict) -> dict:
+        """JPEG-encode each camera's color (depth and other keys untouched); runs outside ``_lock``."""
+        if self.jpeg_quality is None or "cameras" not in observation:
+            return observation
+        cameras = {
+            name: {**fields, "color": self._wire_color(fields["color"])}
+            for name, fields in observation["cameras"].items()
+        }
+        return {**observation, "cameras": cameras}
+
+    # -- teleop.<name>.* -----------------------------------------------------
+    # Not under ``_lock`` and not ``_mark_action``: reading the operator never blocks arm
+    # commands and never keeps the watchdog quiet.
+
+    def _teleop_read(self, timeout_s: float | None = None) -> dict:
+        timeout_s = TELEOP_READ_MAX_TIMEOUT_S if timeout_s is None else timeout_s
+        timeout_s = min(max(timeout_s, 0.0), TELEOP_READ_MAX_TIMEOUT_S)
+        return self.robot.teleop.read(timeout_s).to_dict()
+
+    def _teleop_reset(self) -> None:
+        self.robot.teleop.reset()
 
     # -- watchdog ------------------------------------------------------------
 

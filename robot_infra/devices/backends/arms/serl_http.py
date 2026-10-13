@@ -12,6 +12,7 @@ import numpy as np
 
 from robot_infra.devices.arm import Arm, ControlMode
 from robot_infra.devices.errors import DeviceFault, DeviceNotFound
+from robot_infra.devices.safety import ArmSafety
 
 if TYPE_CHECKING:
     from robot_infra.devices.robot import RobotConfig
@@ -121,8 +122,9 @@ class SerlHttpArm(Arm):
         bridge_url: str,
         timeout_s: float = 5.0,
         home_joints: list[float] | None = None,
+        safety: ArmSafety | None = None,
     ) -> None:
-        super().__init__(name, num_joints=7)
+        super().__init__(name, num_joints=7, safety=safety)
         self._bridge_url = bridge_url
         self._timeout_s = timeout_s
         self._home_joints = None if home_joints is None else np.asarray(home_joints, dtype=np.float64)
@@ -133,7 +135,12 @@ class SerlHttpArm(Arm):
 
     @classmethod
     def from_config(cls, config: "RobotConfig", *, name: str = "arm") -> "SerlHttpArm":
-        return cls(name, bridge_url=config.bridge_url, home_joints=config.home_joints)
+        return cls(
+            name,
+            bridge_url=config.bridge_url,
+            home_joints=config.home_joints,
+            safety=ArmSafety.from_config(config),
+        )
 
     def _open(self) -> _BridgeHandle:
         handle = _BridgeHandle(self._bridge_url, self._timeout_s, self.name)
@@ -151,12 +158,12 @@ class SerlHttpArm(Arm):
         state = self._handle.post("/getstate")
         self.last_gripper_pos = float(state["gripper_pos"])
         self._note_feedback_if_new(state)
-        return {
+        return self._remember_state({
             "tcp_pose": np.asarray(state["pose"], dtype=np.float64),
             "tcp_vel": np.asarray(state["vel"], dtype=np.float64),
             "tcp_force": np.asarray(state["force"], dtype=np.float64),
             "tcp_torque": np.asarray(state["torque"], dtype=np.float64),
-        }
+        })
 
     def _note_feedback_if_new(self, state: dict) -> None:
         """The bridge serves its last cached ROS state with no timestamp (``stamp`` is used if
@@ -173,14 +180,14 @@ class SerlHttpArm(Arm):
             self._last_state_sample = sample
             self._note_feedback()
 
-    def servo_cartesian(self, pose: np.ndarray) -> None:
+    def _servo_cartesian(self, pose: np.ndarray) -> None:
         self._require_mode(ControlMode.CARTESIAN_SERVO)
         self._handle.post("/pose", {"arr": self._pose7(pose).tolist()})
 
-    def servo_joints(self, q: np.ndarray) -> None:
+    def _servo_joints(self, q: np.ndarray) -> None:
         raise NotImplementedError(_NO_JOINT_CONTROL)
 
-    def move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_pose(self, pose: np.ndarray, blocking: bool = True) -> None:
         self._require_mode(ControlMode.IDLE)
         target = self._pose7(pose)
         was_running = self._impedance_running is True
@@ -193,7 +200,7 @@ class SerlHttpArm(Arm):
             if not was_running:
                 self._stop_impedance()
 
-    def move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
+    def _move_to_joints(self, q: np.ndarray, blocking: bool = True) -> None:
         self._require_mode(ControlMode.IDLE)
         q = np.asarray(q, dtype=np.float64)
         if self._home_joints is not None and not np.allclose(q, self._home_joints, atol=1e-3):

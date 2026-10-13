@@ -3,9 +3,10 @@
 `robot_infra` is the real-robot layer of [rl-garden](https://github.com/JaimeParker/rl-garden).
 It provides:
 
-- a **device layer**: typed `Arm` / `Gripper` / `Camera` contracts with backends for
-  Franka (franky, legacy ROS1 bridge), AgileX Piper (pyAgxArm, piper_sdk), and Intel RealSense;
-- **discovery** of attached cameras, CAN interfaces, robot hosts, and HID devices;
+- a **device layer**: typed `Arm` / `Gripper` / `Camera` / `Teleop` contracts with backends for
+  Franka (franky, legacy ROS1 bridge), AgileX Piper (pyAgxArm, piper_sdk), Intel RealSense and
+  SpaceMouse, plus device-side **safety limits** (TCP box, joint limits, per-step caps);
+- **discovery** of attached cameras, teleop devices, CAN interfaces, robot hosts, and HID devices;
 - a **doctor** that checks a robot config layer by layer and prints a fix hint for each failure;
 - a **robot daemon** that serves one robot over gRPC from the robot PC;
 - `RemoteRobot`, a client-side mirror of that robot for use on a GPU machine.
@@ -29,8 +30,10 @@ pip install -e '.[franky,grpc]'     # e.g. a Franka robot PC running the daemon
 | `pyagxarm` | `pyAgxArm` (from GitHub) | Piper via `arm_backend: pyagxarm` (the default for Piper) | robot PC |
 | `piper-sdk` | `piper_sdk` | Piper via the vendor SDK (`arm_backend: piper_sdk`) | robot PC |
 | `realsense` | `pyrealsense2` | RealSense cameras | robot PC |
+| `spacemouse` | `pyspacemouse>=2.0,<3` | `teleop: {backend: spacemouse}` (optional `hidapi` improves discovery) | robot PC |
 | `grpc` | `grpcio>=1.60` | the daemon (`python -m robot_infra.server`) and `RemoteRobot` | robot PC **and** GPU machine |
-| `real` | `flask`, `pyzmq`, `scipy`, `pyspacemouse` | legacy Flask bridge/gripper server and SpaceMouse teleop (ROS1 must be installed separately) | robot PC |
+| `jpeg` | `pillow` | `python -m robot_infra.server --jpeg-quality N` (OpenCV also works as the codec) | robot PC **and** GPU machine |
+| `real` | `flask`, `pyzmq`, `scipy`, `pyspacemouse` | legacy Flask bridge/gripper server and the legacy `teleop/spacemouse/` (old `read_all()` API; do not combine with the `spacemouse` extra's 2.x pin; ROS1 must be installed separately) | robot PC |
 | `sim` | `mani_skill` | the ManiSkill impedance controllers in `controller/simulator/` | GPU machine |
 | `dev` | `pytest` | running the tests | any |
 
@@ -61,7 +64,16 @@ robot_ip: 172.16.0.2          # FCI IP set in Desk (default 172.16.0.2)
 realtime: ignore              # ignore (default) | enforce (requires a PREEMPT_RT kernel)
 relative_dynamics_factor: 0.2 # franky velocity/accel/jerk scale for move_to_* (default 0.2)
 home_joints: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]  # 7 values (default shown)
-# safety_box: [xmin, ymin, zmin, xmax, ymax, zmax]          # validated, not enforced yet
+safety_box: [0.3, -0.3, 0.05, 0.7, 0.3, 0.6]  # [xmin, ymin, zmin, xmax, ymax, zmax] m, base frame of tcp_pose (O_T_EE)
+joint_limits:                 # 7 [lo, hi] pairs in rad; home_joints must lie inside
+  - [-2.8, 2.8]
+  - [-1.7, 1.7]
+  - [-2.8, 2.8]
+  - [-3.0, -0.1]
+  - [-2.8, 2.8]
+  - [0.0, 3.7]
+  - [-2.8, 2.8]
+max_delta_per_step: {xyz_m: 0.05, joint_rad: 0.1}  # servo step cap from the measured state
 claim: true                   # daemon takes a per-host exclusive lock while connected
 gripper:                      # null = no gripper
   backend: franky             # franky (default) | serl_http | fake
@@ -89,6 +101,9 @@ can_interface: can0           # default can0
 bitrate: 1000000              # must match the interface (default 1000000)
 firmware_profile: null        # pyagxarm only: default | v183 | v188 | v189; null probes the arm
 home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 values, rad
+safety_box: [0.1, -0.3, 0.1, 0.5, 0.3, 0.5]   # m, base frame; tcp_pose is the FLANGE pose (no tool offset)
+joint_limits: [[-2.6, 2.6], [0.0, 3.1], [-2.9, 0.0], [-1.7, 1.7], [-1.2, 1.2], [-2.0, 2.0]]  # rad
+max_delta_per_step: {xyz_m: 0.02, joint_rad: 0.05}
 claim: true
 gripper:
   backend: pyagxarm           # must match the arm backend: pyagxarm | piper_sdk
@@ -98,6 +113,20 @@ gripper:
   shares_arm_session: true    # required: the Piper gripper borrows the arm's CAN session
 cameras: []
 ```
+
+Safety limits and teleop (all optional, all three keys are read from the robot PC's yaml):
+
+- `safety_box`: `[xmin, ymin, zmin, xmax, ymax, zmax]` in metres, in the frame of
+  `read_state()["tcp_pose"]` (Franka: `O_T_EE`, Piper: the **flange**, not the gripper tip).
+  Only the position is limited; the orientation is left untouched.
+- `joint_limits`: one `[lo, hi]` pair per joint, in rad. `home_joints` must lie inside it.
+- `max_delta_per_step`: `xyz_m` and/or `joint_rad`, a cap on how far a servo target may be from
+  the measured state. Servo only; `move_to_*` is not capped.
+- The yaml on the robot PC is the source of truth. `servo_*` targets outside the limits are
+  **clipped** and counted (`safety_clips`); `move_to_*` targets outside them are **refused** with
+  `SafetyViolation` and nothing is sent (`safety_rejects`). The same applies through the daemon,
+  `send_action`, and the local API, see [Safety rules](#safety-rules).
+- `teleop:` adds an operator input device as a part of the robot (see [step 7](#7-add-a-teleop-device)).
 
 Notes:
 
@@ -125,6 +154,8 @@ franka (franka)
     wrist: RealSenseCamera [sdk=pyrealsense2, connected=False]
 ```
 
+With a `teleop:` section a last line is added, for example `  teleop: SpaceMouseTeleop [sdk=pyspacemouse, connected=False]`.
+
 ### 2. Plug in and discover
 
 ```bash
@@ -140,6 +171,8 @@ On a machine with nothing attached (real output):
 $ python -m robot_infra.discovery --config robot.yaml
 cameras:
   none
+teleops:
+  none
 can interfaces:
   none
 hosts:
@@ -149,12 +182,14 @@ hid devices:
 ```
 
 With hardware attached, the lines take the form `realsense: <serial>, <serial>`,
+`spacemouse: <vid>:<pid>:<path>` (or `/dev/hidrawN` when `hidapi` is not installed),
 `can0: operstate=up bitrate=1000000`, `172.16.0.2: ping=ok open ports=<list>` and
-`/dev/hidraw0`.
+`/dev/hidraw0`. The `fake` backends are not listed.
 
 | Section | Source | What to look for |
 |---|---|---|
 | `cameras` | each camera backend's `discover()` (RealSense serials) | copy the serial into `cameras[].serial` |
+| `teleops` | each teleop backend's `discover()` (SpaceMouse: `vid:pid:path` through `hidapi` when installed, else every `/dev/hidraw*`) | the device you put in `teleop:` shows up |
 | `can interfaces` | `/sys/class/net/*` with type CAN, bitrate from `ip -details link show` | `operstate=up` and the bitrate in your yaml |
 | `hosts` | `ping` and TCP connect to the config's `robot_ip` | `ping=ok`. For Franka, 1337 open usually means FCI is reachable. |
 | `hid devices` | `/dev/hidraw*` | SpaceMouse and other HID teleop devices |
@@ -167,14 +202,14 @@ Without `--config`, `hosts:` prints `none`.
 python -m robot_infra.doctor --config robot.yaml [--mock] [--fix] [--json]
 ```
 
-The doctor runs five layers in order:
+The doctor runs five layers in order (a `teleop:` section adds checks to layers 1, 2 and 4):
 
 | Layer | Checks | Notes |
 |---|---|---|
-| 1 `sdk` | each backend name resolves and its SDK imports | an unknown backend skips layers 3-5 |
-| 2 `os` | ping `robot_ip` and port 1337 (informational); CAN interface exists / is up / bitrate; camera serial attached | driven by config fields; skipped for backends that need no SDK (fakes) |
+| 1 `sdk` | each backend name resolves and its SDK imports (`sdk:arm`, `sdk:gripper`, `sdk:camera:<name>`, `sdk:teleop:<backend>`) | an unknown backend skips layers 3-5 |
+| 2 `os` | ping `robot_ip` and port 1337 (informational); CAN interface exists / is up / bitrate; camera serial attached; `os:teleop:<name>` (a device of that backend is discovered); `os:hid` (a readable and writable `/dev/hidraw*` exists, SpaceMouse only) | driven by config fields; skipped for backends that need no SDK (fakes) |
 | 3 `handshake` | takes the robot's device claim (unless `claim: false`), then `robot.connect()` | a failure (including a held claim) skips layers 4-5 |
-| 4 `feedback` | the arm returns state; the gripper is readable; each camera delivers a frame within 2 s | |
+| 4 `feedback` | the arm returns state; the gripper is readable; each camera delivers a frame within 2 s; `feedback:teleop:<name>`: the teleop poll thread is alive and healthy | |
 | 5 `mode` | backend preflight: Franka RT kernel, robot mode and libfranka version; Piper status, follower feedback and firmware profile (pyagxarm) or gripper stroke (piper_sdk) | |
 
 Flags:
@@ -228,6 +263,35 @@ $ python -m robot_infra.doctor --config robot.yaml
 summary: 2 ok, 5 failed, 2 skipped
 ```
 
+With a `teleop: {backend: spacemouse}` section, `--mock` swaps the teleop for the fake one
+(its options are dropped) and the extra lines are:
+
+```text
+$ python -m robot_infra.doctor --config robot.yaml --mock
+...
+[1/5] sdk:teleop:fake ... OK  no SDK needed
+[2/5] os:teleop:teleop ... SKIP  skipped (--mock)
+...
+[4/5] feedback:teleop:teleop ... OK  teleop poll thread alive
+```
+
+Without `--mock`, on a machine without `pyspacemouse` and without a SpaceMouse, the teleop
+lines read (the `os:hid` line is only checked for the SpaceMouse backend):
+
+```text
+[1/5] sdk:teleop:spacemouse ... FAIL  SpaceMouseTeleop needs the 'pyspacemouse' package
+    hint: pip install 'pyspacemouse>=2.0,<3' (or: pip install 'rlgarden-robot-infra[spacemouse]')
+[2/5] os:teleop:teleop ... FAIL  no 'spacemouse' teleop device found
+    hint: plug in the teleop device and run `python -m robot_infra.discovery`
+[2/5] os:hid ... FAIL  no HID device found
+    hint: no /dev/hidraw* node: check the USB cable and port; inside Docker pass it with `docker run --device=/dev/hidrawN`
+```
+
+When a `/dev/hidraw*` node exists but this user cannot open it, `os:hid` fails with
+`no read/write access to ['/dev/hidraw3']` and the hint
+`add a udev rule SUBSYSTEM=="hidraw", ATTRS{idVendor}=="256f", MODE="0666" to /etc/udev/rules.d/99-spacemouse.rules, then sudo udevadm control --reload && sudo udevadm trigger and replug; inside Docker pass the node with docker run --device=/dev/hidrawN`
+(the vendor id in the rule is the 3Dconnexion one; check `lsusb` for your unit).
+
 The Piper example with no CAN adapter plugged in (trimmed):
 
 ```text
@@ -279,7 +343,22 @@ python -m robot_infra.server --config robot.yaml --bind 0.0.0.0:50051 [--token T
 | `--watchdog-s` | `0.5` | idle a servoing arm after this many seconds without actions |
 | `--no-preflight` | off | skip the doctor run before serving |
 | `--transport` | `grpc` | the only transport |
-| `--jpeg-quality` | none | accepted, but frames are not JPEG-encoded yet |
+| `--jpeg-quality` | none | JPEG quality 1-100 for every camera's `color` image; see below |
+
+`--jpeg-quality N` (needs `pip install -e '.[jpeg]'`, Pillow or OpenCV, on the daemon **and** on
+every client) sends each camera's `color` image as a JPEG instead of raw bytes, which cuts the
+bandwidth over WiFi. It is **lossy** and daemon-global: only `color` is compressed, `depth` and
+all other fields stay raw, and the client decodes back to a `uint8 (H, W, 3)` array. The policy
+therefore sees compressed pixels, so **train and deploy with the same value** (or none). The
+value is reported by `robot.describe` as the top-level `image_encoding` (`{"jpeg": 80}`, or `null`
+when raw) and as `robot.cameras["wrist"].image_encoding` on the client. A client without
+Pillow/OpenCV fails at `connect()` with `SdkMissing: JPEG frames need Pillow or OpenCV`
+(hint `pip install "rlgarden-robot-infra[jpeg]"`).
+
+Daemon and client ship from the same repo; upgrade the **client first, then the daemon**. A new
+daemon's `arm.health` carries two extra fields (`safety_clips`, `safety_rejects`) that a
+pre-upgrade client cannot parse, and enabling `--jpeg-quality` needs a client that can decode
+JPEG. A client that predates JPEG support cannot decode the frames (its error was not checked).
 
 What happens:
 
@@ -305,6 +384,7 @@ What happens:
      gripper: FakeGripper [sdk=None, connected=False]
      cameras: PartGroup [sdk=None, connected=False]
        wrist: FakeCamera [sdk=None, connected=False]
+     teleop: FakeTeleop [sdk=None, connected=False]
    serving franka 'franka' on 127.0.0.1:50061 (token required)
    ```
 
@@ -318,9 +398,25 @@ What happens:
    joint_servo mode; stopping arm 'arm' and idling it`. Later servo commands raise the
    watchdog `DeviceFault` until the client calls `set_control_mode(...)` again.
    `move_to_*` calls (which hardware backends allow only in `IDLE`) are not watched.
-5. **Ctrl-C / SIGTERM.** The daemon stops the transport, stops the watchdog, disconnects the
+5. **Teleop.** If the yaml has a `teleop:` section the daemon serves `teleop.<name>.read` and
+   `teleop.<name>.reset`. Reads do not refresh the watchdog, and a client's `timeout_s` is
+   clamped to 2 s so a client cannot park a gRPC worker thread. A `teleop` section is
+   mandatory once present: `connect()` fails when the device is absent and takes the whole
+   robot down with it, so a deployment that needs no teleop should use a yaml without the section.
+6. **Ctrl-C / SIGTERM.** The daemon stops the transport, stops the watchdog, disconnects the
    robot and releases the claim. It never powers the robot off and never disables the
    motors (see [Safety rules](#safety-rules)).
+
+`robot.describe` is what a client builds its mirror from. For the fake robot above (trimmed):
+
+```text
+arm: {"num_joints": 7, "supported_state_fields": ["tcp_pose", "tcp_vel", "joint_pos", "joint_vel", "tcp_force", "tcp_torque"], "control_mode": "idle", "safety": {"safety_box": [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5], "joint_limits": [[-1.0, 1.0], ...], "max_delta_per_step": {"xyz_m": 0.05, "joint_rad": 0.1}}, "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+image_encoding: {'jpeg': 80}
+camera cfg: {'name': 'wrist', 'serial': '', 'width': 64, 'height': 48, 'fps': 30, 'enable_depth': False, 'backend': 'fake'}
+teleop: {'name': 'teleop', 'backend': 'fake', 'action_space': 'joint_abs', 'has_gripper': True, 'hold_s': 0.0}
+```
+
+`arm.safety` is `null` when no limit is configured; `arm.home_joints` is the yaml's value (or `null`).
 
 ### 5. Use the robot from the GPU machine
 
@@ -366,6 +462,32 @@ Without `import robot_infra.server`, `Robot.from_dict` raises
   robot = RemoteRobot.from_client(LocalClient(service))   # same API as above, incl. watchdog
   ```
 
+- The daemon's device-side facts are mirrored on the client:
+  `robot.arm.safety_limits` (the dict under `arm.safety` above, or `None`),
+  `robot.arm.home_joints` (list or `None`), `robot.cameras["wrist"].image_encoding`, and
+  `robot.teleop` (`None` without a `teleop:` section). The client does not enforce limits
+  itself (`RemoteRobotConfig` ignores `safety_box`, `joint_limits`, `max_delta_per_step` and
+  `teleop`); the daemon does.
+- A command outside the limits behaves as follows on the client (run it before `robot.disconnect()`):
+
+  ```python
+  import numpy as np
+  from robot_infra.devices import SafetyViolation
+
+  robot.arm.set_control_mode(ControlMode.JOINT_SERVO)
+  robot.arm.servo_joints(np.full(7, 5.0))      # no error: clipped on the daemon, safety_clips += 1
+  robot.arm.set_control_mode(ControlMode.IDLE)
+  try:
+      robot.arm.move_to_joints(np.full(7, 5.0))   # outside joint_limits
+  except SafetyViolation as error:
+      print(error.message, error.hint)            # nothing was sent; the arm and its mode are unchanged
+  print(robot.arm.health().safety_clips, robot.arm.health().safety_rejects)   # cumulative counters since the daemon started, e.g. 2 1
+  print(robot.remote_health()["arm"]["safety_clips"])                         # the same counters from the daemon's robot.health
+  ```
+
+  `SafetyViolation` is a `DeviceError` (not a `DeviceFault`): it does not latch a fault, does
+  not need `recover()`, and does not refresh the daemon watchdog. `robot.health()` is a
+  `Health`; the per-arm counters live in `robot.arm.health()` and `robot.remote_health()`.
 - `rlgarden-real-world` wraps this robot in a gym environment.
 
 ### 6. Use the robot locally (no daemon)
@@ -386,7 +508,70 @@ robot.arm.set_control_mode(ControlMode.IDLE)
 robot.disconnect()
 ```
 
-This path has no watchdog and takes no device claim. Those are daemon features.
+This path has no watchdog and takes no device claim. Those are daemon features. The safety
+limits, however, are enforced here too: `Robot.from_yaml` builds the arm with the yaml's
+`safety_box`/`joint_limits`/`max_delta_per_step`, so `robot.arm.safety_limits`,
+`robot.arm.health().safety_clips` and `SafetyViolation` behave exactly as through the daemon.
+
+### 7. Add a teleop device
+
+A `teleop:` section makes an operator input device a part of the robot. Hardware-free, with
+the fake backend (a script advanced one step per `read()`):
+
+```yaml
+teleop:
+  name: teleop                # the daemon serves teleop.<name>.read / .reset
+  backend: fake               # fake | spacemouse
+  hold_s: 0.0                 # keep intervening this long after the last activity (default 0)
+  options:                    # backend-private
+    action_space: joint_abs   # fake: cartesian_delta (default) | joint_abs | joint_delta
+    num_joints: 7             # joint spaces only
+    has_gripper: true         # default true
+    on_end: hold_last         # hold_last (default) | idle | loop, what happens after the script
+    script:
+      - {action: [0, 0, 0, 0, 0, 0, 0], active: false, hold: 2}
+      - {action: [0.5, 0, 0, 0, 0, 0, 0], gripper: 0.0, active: true, hold: 2}
+      - {events: {episode_end: true}}
+```
+
+A step is `{action, gripper, buttons, events, active, hold}`; `hold` is the number of reads the
+step lasts and its events fire on the first of them. `fail_after: n` makes every poll after the
+n-th sample fail, to test the error path.
+
+```python
+robot = Robot.from_yaml("robot.yaml")          # local; RemoteRobot works the same way
+robot.connect()
+sample = robot.teleop.read()                   # blocks for a new sample, consumes the events
+print(sample.seq, sample.action_space, sample.action, sample.gripper, sample.intervening, sample.events["episode_end"])
+latest = robot.teleop.latest()                 # no blocking, does not consume events
+robot.teleop.reset()                           # drops latched events and the hold_s hysteresis
+```
+
+`read()` returns a `TeleopSample`; over the daemon (`teleop.<name>.read`) it travels as a dict
+with the same keys:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `action` | `float32` ndarray | `cartesian_delta`: `(6,)` normalized twist in [-1, 1]; `joint_abs` / `joint_delta`: `(N,)` joint values in rad |
+| `action_space` | `str` | `cartesian_delta`, `joint_abs` or `joint_delta` |
+| `gripper` | `float` or `None` | normalized width target in [0, 1]; `None` = the device has no gripper channel |
+| `buttons` | `dict[str, bool]` | current levels (SpaceMouse: `button_0`, `button_1`) |
+| `events` | `dict[str, bool]` | latched edges `episode_end`, `success`, `failure`, `rerecord` (always all four keys); `read()` clears them |
+| `intervening` | `bool` | a human is operating (backend's `active`, extended by `hold_s`) |
+| `timestamp` | `float` | `time.monotonic()` on the machine that polled, not comparable across hosts |
+| `seq` | `int` | increases with every polled sample, also across reconnects; a gap means dropped samples |
+
+`read(timeout_s)` raises `DeviceFault` on a timeout and a recoverable `DeviceFault` once 5 polls
+in a row failed (reconnect the robot); it raises `DeviceNotConnected` if the robot is
+disconnected while it waits. There is a single consumer: two clients reading the same teleop
+split the events between them.
+
+`backend: spacemouse` (extra `spacemouse`; options `device_index` 0, `deadzone` 1e-3,
+`invert_axes`, `poll_interval_s` 0.005) is a `cartesian_delta` device with a gripper: the puck
+gives the twist `[-y, x, z, -roll, -pitch, -yaw]`, button 0 toggles the sticky gripper target
+(1.0 = open at connect), button 1 raises `episode_end`. It needs read/write access to
+`/dev/hidraw*`; `python -m robot_infra.doctor` checks this as `os:hid` and prints the udev
+rule. See [Known limitations](#known-limitations-and-needs-hardware-verification).
 
 ## Architecture
 
@@ -396,9 +581,12 @@ Connection (ABC)                 connect()/disconnect() lifecycle, owner borrowi
     ├── Camera   [registry]      background capture thread, read()/latest()/reopen()
     │   ├── realsense, fake
     │   └── (RemoteCamera is a Part, not a Camera)
+    ├── Teleop   [registry]      background poll thread, read()/latest()/reset(), latched events
+    │   ├── spacemouse, fake
+    │   └── (RemoteTeleop is a Part, not a Teleop)
     └── ControllablePart         action_features, send_action()
-        ├── Arm      [registry]  read_state, servo_cartesian/joints, move_to_pose/joints,
-        │   │                    stop, recover, set_control_mode, preflight
+        ├── Arm      [registry]  read_state, servo_cartesian/joints, move_to_pose/joints
+        │   │                    (template methods, see below), stop, recover, set_control_mode, preflight
         │   ├── franky, serl_http, pyagxarm, piper_sdk, fake
         │   └── RemoteArm
         ├── Gripper  [registry]  open/close/move(width in [0, 1]), width; binary | continuous
@@ -414,8 +602,8 @@ Robot PC:   Robot ── RobotService (method table, watchdog, DeviceClaim) ─�
 GPU side:   RemoteRobot ── GrpcClient (msgpack over gRPC, token metadata, read-only retry)
 ```
 
-Backends register by name (`Arm.register("franky")`). `Arm.backends()`, `Gripper.backends()`
-and `Camera.backends()` list them, and `Robot.types()` lists robot types. A gripper with
+Backends register by name (`Arm.register("franky")`). `Arm.backends()`, `Gripper.backends()`,
+`Camera.backends()` and `Teleop.backends()` list them, and `Robot.types()` lists robot types. A gripper with
 `shares_arm_session: true` borrows the arm's session as its `owner` instead of opening its
 own.
 
@@ -431,6 +619,20 @@ own.
 | gripper `pyagxarm` / `piper_sdk` | as the arm | - | - | requires `shares_arm_session: true` and the matching arm backend |
 | camera `realsense` | `pyrealsense2` (`realsense`) | - | - | RGB (+ aligned depth in metres with `enable_depth`) |
 | `fake` gripper / camera | none | - | - | tests and `--mock` |
+| teleop `spacemouse` | `pyspacemouse>=2,<3` (`spacemouse`) | - | - | cartesian twist + sticky gripper; `Teleop.backends()` is `fake`, `spacemouse` |
+| teleop `fake` | none | - | - | scripted samples, `push()` injection, `fail_after`; tests and `--mock` |
+
+**`Arm` is a template-method class.** The public `servo_cartesian`, `servo_joints`,
+`move_to_pose` and `move_to_joints` sanitize the input (shape, finiteness, unit quaternion),
+apply the safety limits and only then call the backend hooks `_servo_cartesian`,
+`_servo_joints`, `_move_to_pose` and `_move_to_joints`. A backend implements the hooks (plus
+`read_state`, `stop`, `recover`, `_enter_control_mode`) and never overrides the public
+methods, so no path to the motors skips the guard. A backend's `read_state()` must return its
+result through `self._remember_state(state)`: the step cap reuses that cached state (at most
+`MAX_DELTA_STATE_AGE_S` = 0.5 s old, else it re-reads) instead of querying the robot on every
+servo call. `Arm.from_config(config)` builds the backend with `ArmSafety.from_config(config)`.
+A third-party backend that skips `_remember_state` still works but costs one extra
+`read_state()` per capped servo call.
 
 ### Safety rules
 
@@ -447,6 +649,24 @@ own.
 - **Connecting enables the motors.** Connecting a Piper (directly, through the doctor, or
   through the daemon when a client connects) enables its motors, and they stay enabled
   after `disconnect()`. Clear the workspace before running the doctor.
+- **Safety limits.** `safety_box`, `joint_limits` and `max_delta_per_step` in the robot yaml on
+  the robot host are the source of truth. `Arm` enforces them in the public command methods, so
+  they hold on every path: local `Robot`, the daemon (`arm.servo_*`, `arm.move_to_*`,
+  `robot.send_action`, `robot.step`) and `send_action`. A `RemoteArm` has no guard of its own and
+  forwards to the daemon's.
+  - `servo_*`: the target is first shortened to `max_delta_per_step` from the measured state, then
+    clipped into the box / joint limits. Any change counts one `safety_clips` and the command is
+    still sent.
+  - `move_to_*`: a target outside the box / joint limits raises `SafetyViolation`, counts one
+    `safety_rejects`, and nothing is sent. `move_to_*` is not step-capped.
+  - `SafetyViolation` is not a device fault: it is raised before the backend is touched, so it
+    cannot latch a fault, needs no `recover()`, keeps the control mode, and through the daemon it
+    does not refresh the watchdog. A client sees the same class.
+  - `arm.health()` reports `safety_clips` / `safety_rejects`; `robot.describe` exposes the limits
+    as `arm.safety`. The checks are validated at build time: `home_joints` must lie inside
+    `joint_limits`, a box must have min <= max.
+  - Limits apply to the position of `tcp_pose` only. The orientation is not limited and not step
+    capped (see [Known limitations](#known-limitations-and-needs-hardware-verification)).
 - **Watchdog.** The daemon idles a servoing arm whose client went quiet (see step 4).
 - **`DeviceClaim`.** An advisory, node-local file lock in `~/.cache/robot_infra/claims/`,
   keyed `<type>:<robot_ip | can_interface | name>`. The daemon holds it while a client is
@@ -468,7 +688,8 @@ Device errors subclass `DeviceError` (a `RuntimeError`) and carry `message`, `hi
 | `device_already_connected` | `DeviceAlreadyConnected` | defined; not raised by current backends (`connect()` is idempotent) |
 | `device_busy` | `DeviceBusy` | another process holds the claim |
 | `device_fault` | `DeviceFault` (`recoverable: bool`) | reflex, e-stop, no feedback, wrong mode, watchdog |
-| `version_mismatch` | `VersionMismatch` | libfranka vs robot server version |
+| `version_mismatch` | `VersionMismatch` | libfranka vs robot server version; a `pyspacemouse` without the 2.x API (`open(device_index=...)`) |
+| `safety_violation` | `SafetyViolation` | a `move_to_*` target outside `safety_box` / `joint_limits`; message lists the offending axes, hint `change the target, or the limits in the robot yaml on the robot host` |
 | `transport` | `TransportError` (a `DeviceFault`) | daemon unreachable, timeout, token mismatch |
 
 ## Testing
@@ -479,11 +700,45 @@ python -m pytest tests -q
 ```
 
 The tests use the fake backends and SDK stubs. No hardware is needed. The gRPC tests are
-skipped when `grpcio` is missing. The maintainers run them in a remote container:
+skipped when `grpcio` is missing. Last run (remote container, Python 3.11): `486 passed`.
+The maintainers run them in a remote container:
 
 ```bash
 docker exec <container> bash -lc 'cd <checkout>/robot_infra && python -m pytest tests -q'
 ```
+
+## Known limitations and needs hardware verification
+
+Nothing below has been exercised on real hardware; the fakes cover the logic only.
+
+- **SpaceMouse USB vendor ids.** `discover()` filters on `0x256f` (3Dconnexion) and `0x046d`
+  (Logitech, older units). Both are unverified; without `hidapi` it lists every `/dev/hidraw*`.
+- **udev and Docker.** The udev rule printed by `os:hid` and the `docker run --device=/dev/hidrawN`
+  hint are untested on a robot PC. A container needs the node passed in before the daemon starts.
+- **Does `pyspacemouse` `read()` block?** The backend polls at `poll_interval_s` (default 0.005 s)
+  so a non-blocking `read()` does not spin a core; set it to `0` only after confirming that
+  `read()` blocks on your pyspacemouse version.
+- **Piper master arm** as a teleop (leader-follower) is not implemented; only `fake` and
+  `spacemouse` exist. The `joint_abs` / `joint_delta` action spaces are exercised by the fake only.
+- **Orientation is not limited.** `safety_box` limits the position, `max_delta_per_step` the
+  position (`xyz_m`) and joints (`joint_rad`) only. A client that servos `tcp_pose` directly can
+  command a large rotation in one step (the gym env bounds it with its own `rot_scale_rad`).
+- **Step cap baseline.** The cap is measured from the last read state (at most 0.5 s old), not
+  from the previous target, so the worst distance between a target and the true position is about
+  twice the cap, without accumulating.
+- **Bypassing the guard.** The legacy ROS1 bridge (`serl_http`) is an HTTP server: a client
+  that talks to `bridge_url` directly does not pass through `Arm`, so none of the limits apply.
+  Third-party backends must implement the `_servo_*`/`_move_*` hooks, not override the public methods.
+- **A configured teleop is mandatory.** `connect()` fails and rolls the whole robot back when the
+  teleop device is absent, including for deployment. Use a yaml without `teleop:` to deploy.
+- **Version skew.** A daemon with these features breaks a pre-upgrade client at `arm.health()`
+  (new fields), and an old client cannot read JPEG frames. Upgrade the client first.
+- **`--jpeg-quality` is not recorded** in a training run's config; deploy cannot check that it
+  matches the value used for training.
+- **Teleop read clamp and clocks.** `teleop.<name>.read` over the daemon waits at most 2 s;
+  `timestamp` is the robot PC's monotonic clock. `RemoteTeleop.get_observation()` returns the
+  client's last sample, while the daemon's `robot.get_observation()` contains a `teleop` entry
+  taken from the daemon's latest sample (events not consumed).
 
 ## Legacy
 
@@ -498,6 +753,8 @@ These modules predate the device layer and are kept for existing users. Planned 
   backend is their client. Run the bridge on the ROS machine with
   `python -m robot_infra.controller.real.franka_bridge --robot_ip <ip> --port 5000` (extra
   `real`; ROS1 is installed separately, see the module docstring).
-- **`teleop/`**: SpaceMouse teleop (`teleop/spacemouse/`, extra `real`) and twist-based
-  teleop utilities (`teleop/utils/`, `teleop/examples/`). They are not yet integrated with
-  the device layer.
+- **`teleop/`**: the pre-device-layer teleop (`teleop/spacemouse/` on the old `pyspacemouse`
+  `read_all()` API, extra `real`; `teleop/utils/` twist teleop for Pico over ZeroMQ;
+  `teleop/examples/`). The `Teleop` part ([step 7](#7-add-a-teleop-device)) supersedes the
+  SpaceMouse code. The Pico path is not migrated yet and `rlgarden-real-world`'s
+  `--teleop-device pico|spacemouse` still imports these modules, so they stay until it is.

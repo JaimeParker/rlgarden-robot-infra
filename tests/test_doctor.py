@@ -232,3 +232,34 @@ def test_doctor_releases_claim_afterwards(claim_dir):
     assert exit_code(run_doctor(config)) == 0
     with DeviceClaim(claim_key(Robot.from_config(config))):
         pass
+
+
+def test_mock_doctor_covers_teleop_and_skips_its_os_check():
+    from robot_infra.devices import TeleopConfig
+
+    config = PiperConfig(teleop=TeleopConfig(name="sm", backend="spacemouse", options={"device_index": 0}))
+    results = run_doctor(config, mock=True)
+    names = {r.name: r for r in results}
+    assert names["sdk:teleop:fake"].ok and names["sdk:teleop:fake"].message == "no SDK needed"
+    assert names["os:teleop:sm"].skipped
+    assert names["feedback:teleop:sm"].ok and not names["feedback:teleop:sm"].skipped
+    assert exit_code(results) == 0
+
+
+def test_fake_teleop_needs_no_os_device():
+    from robot_infra.devices import TeleopConfig
+
+    results = run_doctor(franka_config(teleop=TeleopConfig(backend="fake")))
+    os_teleop = next(r for r in results if r.name == "os:teleop:teleop")
+    assert os_teleop.skipped and os_teleop.message == "backend 'fake' needs no OS device"
+    assert next(r for r in results if r.name == "feedback:teleop:teleop").ok
+    assert exit_code(results) == 0
+
+
+def test_unknown_teleop_backend_fails_sdk_layer():
+    from robot_infra.devices import TeleopConfig
+
+    results = run_doctor(franka_config(teleop=TeleopConfig(backend="nonexistent")))
+    sdk = next(r for r in results if r.name == "sdk:teleop:nonexistent")
+    assert not sdk.ok and "nonexistent" in sdk.message
+    assert exit_code(results) == 1

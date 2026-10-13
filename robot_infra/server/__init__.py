@@ -8,6 +8,7 @@ from robot_infra.server.remote import (
     RemoteGripper,
     RemoteRobot,
     RemoteRobotConfig,
+    RemoteTeleop,
 )
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "RemoteGripper",
     "RemoteRobot",
     "RemoteRobotConfig",
+    "RemoteTeleop",
     "RobotService",
     "encode_jpeg",
     "pack",

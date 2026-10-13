@@ -137,3 +137,55 @@ def test_unknown_camera_key_names_key_and_config():
 
     with pytest.raises(ValueError, match="unknown key 'fpss' for CameraConfig"):
         RobotConfig.from_dict({"cameras": [{"name": "wrist", "fpss": 30}]})
+
+
+def piper_with_teleop(**teleop) -> dict:
+    return {**piper_dict(), "teleop": {"backend": "fake", **teleop}}
+
+
+def test_teleop_config_parses_and_is_the_last_child():
+    from robot_infra.devices import TeleopConfig
+    from robot_infra.devices.backends.teleops.fake import FakeTeleop
+
+    robot = Robot.from_dict(piper_with_teleop(name="sm", hold_s=0.2, options={"on_end": "idle"}))
+    assert isinstance(robot.config.teleop, TeleopConfig) and robot.config.teleop.hold_s == 0.2
+    assert isinstance(robot.teleop, FakeTeleop) and robot.teleop.name == "sm"
+    assert list(robot.children) == ["arm", "gripper", "teleop"]
+    assert Robot.from_dict(piper_dict()).teleop is None
+    assert Robot.from_dict({**piper_dict(), "teleop": None}).teleop is None
+
+
+def test_teleop_unknown_key_raises():
+    with pytest.raises(ValueError, match="unknown key 'deadzone' for TeleopConfig"):
+        Robot.from_dict(piper_with_teleop(deadzone=0.1))
+
+
+def test_teleop_yaml_round_trip(tmp_path):
+    robot = Robot.from_dict(piper_with_teleop(options={"script": [{"active": True}]}))
+    before = robot.config.to_dict()
+    path = tmp_path / "robot.yaml"
+    path.write_text(yaml.safe_dump(before))
+    assert Robot.from_yaml(path).config.to_dict() == before
+
+
+def test_teleop_disconnects_before_the_arm(monkeypatch):
+    from robot_infra.devices.backends.arms.fake import FakeArm
+    from robot_infra.devices.backends.teleops.fake import FakeTeleop
+
+    order: list[str] = []
+    arm_release = FakeArm._release
+    teleop_close = FakeTeleop._close_device
+    monkeypatch.setattr(FakeArm, "_release", lambda self, h: (order.append("arm"), arm_release(self, h))[1])
+    monkeypatch.setattr(
+        FakeTeleop, "_close_device", lambda self, h: (order.append("teleop"), teleop_close(self, h))[1]
+    )
+    robot = Robot.from_dict(piper_with_teleop(options={"script": [{"action": [0.1] * 6}]}))
+    robot.connect()
+    assert robot.teleop.is_connected
+    observation = robot.get_observation()
+    assert observation.keys() == {"arm", "gripper", "teleop"}
+    assert observation["teleop"]["action"].shape == (6,)
+    assert float(robot.teleop.read().action[0]) == pytest.approx(0.1)
+    robot.disconnect()
+    assert order == ["teleop", "arm"]
+    assert not robot.teleop.is_connected

@@ -165,3 +165,66 @@ def test_config_validation():
         RemoteRobotConfig(transport="zmq")
     with pytest.raises(ValueError, match="from_client"):
         RemoteRobot(RemoteRobotConfig(transport="local"))
+
+
+TELEOP_SCRIPT = [
+    {"action": [0.5, 0.0, 0.0, 0.0, 0.0, -0.5], "gripper": 0.3, "active": True, "buttons": {"left": True}},
+    {"events": {"success": True}},
+]
+
+
+@pytest.fixture
+def teleop_remote(tmp_path, monkeypatch):
+    from robot_infra.devices import TeleopConfig
+
+    monkeypatch.setattr(claims, "_DEFAULT_LOCK_DIR", tmp_path / "claims")
+    robot = FrankaRobot(
+        FrankaConfig(
+            arm_backend="fake",
+            gripper=GripperConfig(backend="fake"),
+            teleop=TeleopConfig(name="sm", backend="fake", hold_s=0.1, options={"script": TELEOP_SCRIPT}),
+        )
+    )
+    service = RobotService(robot, watchdog_s=30.0)
+    remote = RemoteRobot.from_client(LocalClient(service))
+    remote.connect()
+    yield remote
+    remote.disconnect()
+    service.close()
+
+
+def test_remote_teleop_round_trip(teleop_remote):
+    from robot_infra.devices import TeleopSample
+    from robot_infra.server.remote import RemoteTeleop
+
+    teleop = teleop_remote.teleop
+    assert isinstance(teleop, RemoteTeleop) and teleop.is_connected
+    assert list(teleop_remote.children)[-1] == "teleop"
+    assert teleop.action_space == "cartesian_delta" and teleop.has_gripper is True
+    assert teleop.action_dim == 6 and teleop.hold_s == 0.1
+    assert teleop.latest() is None
+    sample = teleop.read(timeout_s=1.0)
+    assert isinstance(sample, TeleopSample)
+    assert isinstance(sample.action, np.ndarray) and sample.action.dtype == np.float32
+    np.testing.assert_allclose(sample.action, [0.5, 0, 0, 0, 0, -0.5])
+    assert sample.intervening is True and sample.gripper == pytest.approx(0.3)
+    assert sample.buttons == {"left": True} and isinstance(sample.events, dict)
+    assert teleop.latest() is sample
+    second = teleop.read()
+    assert second.events["success"] is True and second.seq > sample.seq
+    assert teleop.read().events["success"] is False
+    teleop.reset()
+    assert teleop.health().ok is True and teleop.health().thread_alive is True
+    assert teleop.get_observation()["action"].shape == (6,)
+    assert teleop_remote.get_observation()["teleop"]["intervening"].dtype == bool
+
+
+def test_remote_without_teleop_has_none(connected):
+    assert connected.teleop is None
+
+
+def test_server_package_exports_remote_teleop():
+    from robot_infra.server import RemoteTeleop
+    from robot_infra.server.remote import RemoteTeleop as Original
+
+    assert RemoteTeleop is Original

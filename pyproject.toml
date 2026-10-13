@@ -38,6 +38,11 @@ franky = ["franky-control"]
 piper-sdk = ["piper_sdk"]
 # server/transport/grpc_transport.py: the robot daemon gRPC transport.
 grpc = ["grpcio>=1.60"]
+# server/codec.py: lossy JPEG camera frames (daemon --jpeg-quality); needed on the daemon and the client.
+jpeg = ["pillow"]
+# devices/backends/teleops/spacemouse.py: SpaceMouse teleop (pyspacemouse 2.x API; the legacy `real` extra
+# is for teleop/spacemouse/, which uses the old read_all() API). hidapi is optional, for discovery.
+spacemouse = ["pyspacemouse>=2.0,<3"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]

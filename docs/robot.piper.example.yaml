@@ -7,6 +7,12 @@ can_interface: can0           # SocketCAN interface (default can0)
 bitrate: 1000000              # must match `ip -details link show can0` (default 1000000)
 firmware_profile: null        # pyagxarm only: default | v183 | v188 | v189; null probes the arm
 home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 values, rad (default shown)
+# Safety limits, enforced by the arm (and so by the daemon): servo targets are clipped,
+# move_to_* targets outside them are refused with SafetyViolation. Omit a key for no limit.
+# tcp_pose on Piper is the FLANGE pose (no tool offset): leave room for the gripper in the box.
+# safety_box: [0.1, -0.3, 0.1, 0.5, 0.3, 0.5]  # [xmin, ymin, zmin, xmax, ymax, zmax] m, base frame
+# joint_limits: [[-2.6, 2.6], [0.0, 3.1], [-2.9, 0.0], [-1.7, 1.7], [-1.2, 1.2], [-2.0, 2.0]]  # rad
+# max_delta_per_step: {xyz_m: 0.02, joint_rad: 0.05}  # servo step cap from the measured state
 claim: true
 gripper:
   backend: pyagxarm           # must match the arm: pyagxarm | piper_sdk
@@ -15,3 +21,12 @@ gripper:
   binary_threshold: 0.5
   shares_arm_session: true    # required: the Piper gripper borrows the arm's CAN session
 cameras: []
+# teleop:                       # default: no teleop; when set, the device must be present at connect
+#   name: teleop                # daemon serves teleop.<name>.read / teleop.<name>.reset
+#   backend: fake               # fake | spacemouse
+#   hold_s: 0.0                 # keep intervening this long after the last activity (default 0)
+#   options:                    # backend-private; fake: action_space, has_gripper, num_joints,
+#     action_space: joint_abs   #   script, on_end (hold_last | idle | loop), fail_after
+#     num_joints: 6
+#     script:
+#       - {action: [0, 0.2, -0.2, 0, 0, 0], active: true}

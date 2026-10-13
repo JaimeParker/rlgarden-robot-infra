@@ -1,4 +1,4 @@
-"""Read-only probes: cameras, CAN interfaces, reachable hosts and HID devices."""
+"""Read-only probes: cameras, teleop devices, CAN interfaces, reachable hosts and HID devices."""
 from __future__ import annotations
 
 import glob
@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from robot_infra.devices import Camera, RobotConfig
+from robot_infra.devices import Camera, RobotConfig, Teleop
 
 _ARPHRD_CAN = "280"
 _DEFAULT_PORTS = (22, 80, 443, 1337, 50051)
@@ -32,6 +32,7 @@ class HostInfo:
 @dataclass
 class DiscoveryReport:
     cameras: dict[str, set[str]] = field(default_factory=dict)
+    teleops: dict[str, set[str]] = field(default_factory=dict)
     can_interfaces: dict[str, CanInfo] = field(default_factory=dict)
     hosts: dict[str, HostInfo] = field(default_factory=dict)
     hid_devices: list[str] = field(default_factory=list)
@@ -42,6 +43,13 @@ class DiscoveryReport:
             for backend, serials in sorted(self.cameras.items()):
                 if serials:
                     lines.append(f"  {backend}: {', '.join(sorted(serials))}")
+        else:
+            lines.append("  none")
+        lines.append("teleops:")
+        if any(self.teleops.values()):
+            for backend, devices in sorted(self.teleops.items()):
+                if devices:
+                    lines.append(f"  {backend}: {', '.join(sorted(devices))}")
         else:
             lines.append("  none")
         lines.append("can interfaces:")
@@ -130,6 +138,19 @@ def discover_cameras(hardware_only: bool = False) -> dict[str, set[str]]:
     return cameras
 
 
+def discover_teleops(hardware_only: bool = False) -> dict[str, set[str]]:
+    """Device ids per teleop backend; ``hardware_only`` skips backends without a vendor SDK (the fake)."""
+    teleops: dict[str, set[str]] = {}
+    for name, backend_cls in sorted(Teleop.backends().items()):
+        if hardware_only and backend_cls.SDK is None:
+            continue
+        try:
+            teleops[name] = set(backend_cls.discover())
+        except Exception:
+            teleops[name] = set()
+    return teleops
+
+
 def discover_all(
     host_ips: Iterable[str] = (), ports: Iterable[int] = _DEFAULT_PORTS
 ) -> DiscoveryReport:
@@ -140,6 +161,7 @@ def discover_all(
     }
     return DiscoveryReport(
         cameras=discover_cameras(hardware_only=True),
+        teleops=discover_teleops(hardware_only=True),
         can_interfaces=list_can_interfaces(),
         hosts=hosts,
         hid_devices=sorted(glob.glob("/dev/hidraw*")),
