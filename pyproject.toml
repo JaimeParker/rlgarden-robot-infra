@@ -26,6 +26,8 @@ sim = ["mani_skill"]
 # not pip-installable and must be set up separately -- see
 # franka_bridge.py's module docstring.
 real = ["flask", "pyzmq", "scipy", "pyspacemouse"]
+# devices/backends/cameras/realsense.py: Intel RealSense camera backend.
+realsense = ["pyrealsense2"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]

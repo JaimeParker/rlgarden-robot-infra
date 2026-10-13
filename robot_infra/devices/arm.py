@@ -15,6 +15,7 @@ from robot_infra.devices.registry import BackendRegistry
 
 if TYPE_CHECKING:
     from robot_infra.devices.robot import RobotConfig
+    from robot_infra.doctor.checks import CheckResult
 
 
 class ControlMode(Enum):
@@ -174,6 +175,10 @@ class Arm(ControllablePart, BackendRegistry, ABC):
             robot_mode=self._robot_mode,
             control_mode=self._control_mode.value,
         )
+
+    def preflight(self) -> list["CheckResult"]:
+        """Backend-specific mode checks run by the doctor after first feedback (FCI active, RT kernel, follower mode ...). Default: none."""
+        return []
 
     def _note_feedback(self) -> None:
         self._last_feedback_time = time.monotonic()
