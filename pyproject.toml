@@ -14,6 +14,7 @@ dependencies = [
     "tyro",
     "filelock",
     "pyyaml",
+    "msgpack",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,8 @@ pyagxarm = ["pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git"]
 franky = ["franky-control"]
 # devices/backends/{arms,grippers}/piper_sdk.py: AgileX Piper over the vendor SDK.
 piper-sdk = ["piper_sdk"]
+# server/transport/grpc_transport.py: the robot daemon gRPC transport.
+grpc = ["grpcio>=1.60"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]

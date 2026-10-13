@@ -20,7 +20,8 @@ class DeviceClaim:
         lock_dir = Path(lock_dir) if lock_dir is not None else _DEFAULT_LOCK_DIR
         lock_dir.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
-        self._lock = filelock.FileLock(str(lock_dir / f"{slug}.lock"), timeout=0)
+        # thread_local=False: a daemon acquires and releases from different gRPC worker threads.
+        self._lock = filelock.FileLock(str(lock_dir / f"{slug}.lock"), timeout=0, thread_local=False)
 
     def acquire(self) -> None:
         try:
