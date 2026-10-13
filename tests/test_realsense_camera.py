@@ -145,7 +145,14 @@ def test_empty_serial_no_devices_points_to_discover(install_rs):
     install_rs([])
     with pytest.raises(DeviceNotFound) as info:
         RealSenseCamera(config()).connect()
-    assert "robot_infra.discover" in info.value.hint
+    assert "python -m robot_infra.discovery`" in info.value.hint
+
+
+def test_serial_not_attached_hint_names_discovery_module(install_rs):
+    install_rs(["A1"])
+    with pytest.raises(DeviceNotFound) as info:
+        RealSenseCamera(config(serial="ZZ")).connect()
+    assert "python -m robot_infra.discovery`" in info.value.hint
 
 
 def test_serial_not_attached_lists_discovered(install_rs):

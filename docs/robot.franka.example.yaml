@@ -1,0 +1,26 @@
+# Franka Panda + Franka Hand + one RealSense. Load with Robot.from_yaml(path).
+# Omitted keys take the FrankaConfig defaults shown in the comments.
+type: franka                  # registered robot type: franka | piper | remote
+name: franka                  # default "franka"
+arm_backend: franky           # franky (libfranka, default) | serl_http (legacy ROS1 bridge) | fake
+robot_ip: 172.16.0.2          # FCI IP set in Desk (default 172.16.0.2)
+# bridge_url: http://127.0.0.1:5000   # serl_http only: URL of controller/real/franka_bridge.py
+realtime: ignore              # ignore (default) | enforce: enforce needs a PREEMPT_RT kernel
+relative_dynamics_factor: 0.2 # franky velocity/acc/jerk scale for move_to_* (default 0.2)
+home_joints: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]  # 7 values (default shown)
+# safety_box: [xmin, ymin, zmin, xmax, ymax, zmax]          # validated (6 values), not enforced yet
+claim: true                   # daemon takes an exclusive per-host lock on this robot (default true)
+gripper:                      # null for no gripper
+  backend: franky             # franky (default) | serl_http | fake
+  max_width_m: 0.08
+  mode: binary                # binary (default) | continuous
+  binary_threshold: 0.5       # binary mode: action > threshold opens
+  shares_arm_session: false   # the Franka Hand opens its own connection
+cameras:                      # default: no cameras
+  - name: wrist
+    backend: realsense        # realsense (default) | fake
+    serial: ""                # empty = use the only attached camera; set it when >1 is plugged in
+    width: 640
+    height: 480
+    fps: 30
+    enable_depth: false

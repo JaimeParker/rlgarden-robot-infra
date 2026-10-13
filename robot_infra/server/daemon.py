@@ -8,7 +8,7 @@ import threading
 from typing import Sequence
 
 from robot_infra.devices import Robot, RobotConfig
-from robot_infra.discovery.autoconfig import fill_from_env, load_config
+from robot_infra.discovery.autoconfig import load_config_with_env
 from robot_infra.doctor.checks import exit_code, run_doctor
 from robot_infra.doctor.cli import format_text
 from robot_infra.server.service import RobotService
@@ -38,7 +38,7 @@ def _make_transport(name: str) -> Transport:
 
 
 def load_daemon_config(args: argparse.Namespace) -> RobotConfig:
-    return fill_from_env(load_config(args.config))
+    return load_config_with_env(args.config)
 
 
 def preflight_passed(config: RobotConfig) -> bool:

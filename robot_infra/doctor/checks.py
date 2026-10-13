@@ -16,6 +16,7 @@ from robot_infra.devices import (
     RobotConfig,
     SdkMissing,
 )
+from robot_infra.devices.claims import DeviceClaim, claim_key
 from robot_infra.discovery import enumerate as probes
 
 LAYER_NAMES = {1: "sdk", 2: "os", 3: "handshake", 4: "feedback", 5: "mode"}
@@ -111,8 +112,31 @@ def _os_checks(config: RobotConfig) -> list[tuple[str, Check]]:
     can_interface = getattr(config, "can_interface", None)
     if can_interface:
         named += _can_outcomes(can_interface, getattr(config, "bitrate", None))
-    named += [(f"os:camera:{camera.name}", _camera_outcome(camera)) for camera in config.cameras]
-    return [(name, _make_check(2, name, fn)) for name, fn in named]
+    arm_needs_no_device = _backend_needs_no_device(Arm, config.arm_backend)
+    checks: list[tuple[str, Check]] = []
+    for name, fn in named:
+        if arm_needs_no_device:
+            checks.append((name, _no_device_check(name, config.arm_backend)))
+        else:
+            checks.append((name, _make_check(2, name, fn)))
+    for camera in config.cameras:
+        name = f"os:camera:{camera.name}"
+        if _backend_needs_no_device(Camera, camera.backend):
+            checks.append((name, _no_device_check(name, camera.backend)))
+        else:
+            checks.append((name, _make_check(2, name, _camera_outcome(camera))))
+    return checks
+
+
+def _backend_needs_no_device(part_cls: type, backend: str) -> bool:
+    try:
+        return part_cls.backend(backend).SDK is None
+    except ValueError:
+        return False
+
+
+def _no_device_check(name: str, backend: str) -> Check:
+    return lambda: _skipped(2, name, f"backend '{backend}' needs no OS device")
 
 
 def _ping_outcome(ip: str) -> Callable[[], Outcome]:
@@ -137,7 +161,7 @@ def _tcp_outcome(ip: str) -> Callable[[], Outcome]:
 
 def _can_outcomes(iface: str, bitrate: int | None) -> list[tuple[str, Callable[[], Outcome]]]:
     activate_hint = (
-        "run `bash can_activate.sh <iface> <bitrate>` from piper_sdk, or "
+        f"run `bash can_activate.sh {iface} {bitrate}` from piper_sdk, or "
         f"`sudo ip link set {iface} up type can bitrate {bitrate}`"
     )
 
@@ -169,6 +193,14 @@ def _camera_outcome(camera) -> Callable[[], Outcome]:
             return True, f"will use {discovered[0]}"
         if camera.serial in discovered:
             return True, f"serial {camera.serial} found"
+        if not camera.serial:
+            if not discovered:
+                return False, "no RealSense device found (serial unset)", "plug in the camera and run `python -m robot_infra.discovery`"
+            return (
+                False,
+                f"serial unset and {len(discovered)} devices attached; set serial to one of {discovered}",
+                f"set serial; discovered: {discovered}",
+            )
         return (
             False,
             f"camera '{camera.name}' serial '{camera.serial}' not found",
@@ -206,9 +238,11 @@ def run_doctor(config: RobotConfig, *, mock: bool = False, fix: bool = False) ->
         return results
 
     robot: Robot | None = None
+    claim: DeviceClaim | None = None
     try:
         robot = Robot.from_config(config)
-        handshake = record(_handshake_check(robot))
+        claim = DeviceClaim(claim_key(robot)) if config.claim else None
+        handshake = record(_handshake_check(robot, claim))
         if not handshake.ok:
             for layer in (4, 5):
                 results.append(_skipped(layer, LAYER_NAMES[layer], "skipped: handshake failed"))
@@ -221,16 +255,19 @@ def run_doctor(config: RobotConfig, *, mock: bool = False, fix: bool = False) ->
     finally:
         if robot is not None:
             _disconnect(robot, results)
+        if claim is not None and claim.held:
+            claim.release()
     return results
 
 
-def _handshake_check(robot: Robot) -> Check:
+def _handshake_check(robot: Robot, claim: DeviceClaim | None) -> Check:
     def run() -> CheckResult:
         try:
+            if claim is not None:
+                claim.acquire()
             robot.connect()
         except DeviceFault as error:
-            autofix = robot.arm.recover if error.recoverable else None
-            return CheckResult(3, "handshake", False, error.message, error.hint, autofix=autofix)
+            return CheckResult(3, "handshake", False, error.message, error.hint)
         except DeviceError as error:
             return CheckResult(3, "handshake", False, error.message, error.hint)
         except Exception as error:

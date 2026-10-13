@@ -1,11 +1,12 @@
 """AgileX gripper on a Piper, driven through the arm's pyAgxArm effector."""
 from __future__ import annotations
 
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from robot_infra.devices.backends.arms.pyagxarm import AgxArm
+from robot_infra.devices.backends.arms.pyagxarm import AgxArm, require_pyagxarm
 from robot_infra.devices.errors import DeviceFault
 from robot_infra.devices.gripper import Gripper, GripperMode
 
@@ -18,6 +19,10 @@ class AgxGripper(Gripper):
     """Borrows the arm's CAN session (owner=arm); the arm must be built with with_gripper=True."""
 
     SDK = "pyAgxArm"
+
+    @classmethod
+    def require_sdk(cls) -> ModuleType:
+        return require_pyagxarm(cls)
 
     def __init__(
         self,

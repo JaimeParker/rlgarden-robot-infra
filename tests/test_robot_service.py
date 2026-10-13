@@ -93,7 +93,7 @@ def test_claim_contention_and_release(services):
     first.dispatch("robot.connect", {})
     with pytest.raises(DeviceBusy) as info:
         second.dispatch("robot.connect", {})
-    assert "franka:172.16.0.2" in str(info.value) and "claim=False" in info.value.hint
+    assert "franka:172.16.0.2" in str(info.value) and "`claim: false`" in info.value.hint
     assert not second.robot.is_connected
     first.dispatch("robot.disconnect", {})
     second.dispatch("robot.connect", {})

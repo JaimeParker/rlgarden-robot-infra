@@ -4,12 +4,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import TracebackType
+from typing import TYPE_CHECKING
 
 import filelock
 
 from robot_infra.devices.errors import DeviceBusy
 
+if TYPE_CHECKING:
+    from robot_infra.devices.robot import Robot
+
 _DEFAULT_LOCK_DIR = Path.home() / ".cache" / "robot_infra" / "claims"
+
+
+def claim_key(robot: "Robot") -> str:
+    config = robot.config
+    address = getattr(config, "robot_ip", None) or getattr(config, "can_interface", None) or config.name
+    return f"{robot.ROBOT_TYPE}:{address}"
 
 
 class DeviceClaim:
@@ -29,9 +39,13 @@ class DeviceClaim:
         except filelock.Timeout:
             raise DeviceBusy(
                 f"device '{self.key}' is claimed by another process",
-                hint=f"stop the other process using '{self.key}' or run with claim=False",
+                hint=f"stop the other process using '{self.key}', or set `claim: false` in the robot config",
                 device=self.key,
             ) from None
+
+    @property
+    def held(self) -> bool:
+        return self._lock.is_locked
 
     def release(self) -> None:
         self._lock.release()

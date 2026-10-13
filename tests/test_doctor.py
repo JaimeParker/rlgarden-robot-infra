@@ -7,6 +7,8 @@ import pytest
 import yaml
 
 from robot_infra.devices import CameraConfig, DeviceFault, GripperConfig
+from robot_infra.devices.claims import DeviceClaim, claim_key
+from robot_infra.devices.robot import Robot
 from robot_infra.devices.backends.arms.fake import FakeArm
 from robot_infra.devices.backends.cameras.fake import FakeCamera
 from robot_infra.devices.robots.franka import FrankaConfig
@@ -32,11 +34,18 @@ def reachable(monkeypatch):
     monkeypatch.setattr(FakeCamera, "discover", classmethod(lambda cls: {"S1"}))
 
 
+@pytest.fixture
+def sdk_backed_fakes(monkeypatch):
+    """Make the fakes look like SDK-backed hardware so the OS probes run (os is always importable)."""
+    monkeypatch.setattr(FakeArm, "SDK", "os")
+    monkeypatch.setattr(FakeCamera, "SDK", "os")
+
+
 def by_layer(results, layer):
     return [result for result in results if result.layer == layer]
 
 
-def test_all_green():
+def test_all_green(sdk_backed_fakes):
     results = run_doctor(franka_config())
     assert exit_code(results) == 0
     assert {result.layer for result in results} == {1, 2, 3, 4, 5}
@@ -46,7 +55,7 @@ def test_all_green():
     assert "mode:none" in names
 
 
-def test_ping_failure_does_not_skip_later_layers(monkeypatch):
+def test_ping_failure_does_not_skip_later_layers(monkeypatch, sdk_backed_fakes):
     monkeypatch.setattr(probes, "ping", lambda ip, timeout_s=1.0: False)
     results = run_doctor(franka_config())
     ping_result = next(result for result in results if result.name == "os:ping")
@@ -72,7 +81,7 @@ def test_handshake_failure_skips_feedback_and_mode(monkeypatch):
     monkeypatch.setattr(FakeArm, "_open", open_fails)
     results = run_doctor(franka_config())
     handshake = by_layer(results, 3)[0]
-    assert not handshake.ok and handshake.hint == "enable FCI" and handshake.autofix is not None
+    assert not handshake.ok and handshake.hint == "enable FCI" and handshake.autofix is None
     assert all(r.skipped for layer in (4, 5) for r in by_layer(results, layer))
 
 
@@ -111,7 +120,7 @@ def test_fix_reopens_camera_and_flips_result(monkeypatch):
     assert exit_code(fixed) == 0
 
 
-def test_fix_without_autofix_leaves_failure(monkeypatch):
+def test_fix_without_autofix_leaves_failure(monkeypatch, sdk_backed_fakes):
     monkeypatch.setattr(probes, "ping", lambda ip, timeout_s=1.0: False)
     results = run_doctor(franka_config(), fix=True)
     assert not next(r for r in results if r.name == "os:ping").ok
@@ -159,3 +168,67 @@ def test_cli_text_and_json(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert {entry["layer"] for entry in payload} == {1, 2, 3, 4, 5}
     assert all("autofix" not in entry for entry in payload)
+
+
+def test_fake_backends_skip_os_probes_and_pass(monkeypatch):
+    monkeypatch.setattr(probes, "ping", lambda ip, timeout_s=1.0: False)
+    results = run_doctor(franka_config(robot_ip="10.0.0.2"))
+    assert exit_code(results) == 0
+    os_results = {r.name: r for r in by_layer(results, 2)}
+    assert {"os:ping", "os:tcp", "os:camera:wrist"} <= set(os_results)
+    assert all(r.skipped and r.message == "backend 'fake' needs no OS device" for r in os_results.values())
+
+
+def test_cli_fills_robot_ip_from_env(tmp_path, monkeypatch, capsys, sdk_backed_fakes):
+    pinged = []
+    monkeypatch.setattr(probes, "ping", lambda ip, timeout_s=1.0: pinged.append(ip) or True)
+    monkeypatch.setenv("ROBOT_IP", "10.9.8.7")
+    path = tmp_path / "robot.yaml"
+    path.write_text(yaml.safe_dump({"type": "franka", "arm_backend": "fake", "robot_ip": "", "gripper": {"backend": "fake"}}))
+    assert cli.main(["--config", str(path)]) == 0
+    assert pinged == ["10.9.8.7"]
+    capsys.readouterr()
+
+
+def test_can_hints_fill_both_halves(monkeypatch, sdk_backed_fakes):
+    monkeypatch.setattr(probes, "list_can_interfaces", lambda: {})
+    results = run_doctor(PiperConfig(arm_backend="fake", can_interface="can3", bitrate=500000, gripper=None))
+    hint = next(r for r in results if r.name == "os:can_exists").hint
+    assert "<iface>" not in hint and "<bitrate>" not in hint
+    assert "bash can_activate.sh can3 500000" in hint and "ip link set can3 up type can bitrate 500000" in hint
+
+
+def test_camera_check_messages_with_unset_serial(monkeypatch, sdk_backed_fakes):
+    def camera_result():
+        return next(r for r in run_doctor(franka_config()) if r.name == "os:camera:wrist")
+
+    monkeypatch.setattr(FakeCamera, "discover", classmethod(lambda cls: set()))
+    none_found = camera_result()
+    assert not none_found.ok and none_found.message == "no RealSense device found (serial unset)"
+    monkeypatch.setattr(FakeCamera, "discover", classmethod(lambda cls: {"A1", "B2"}))
+    several = camera_result()
+    assert several.message == "serial unset and 2 devices attached; set serial to one of ['A1', 'B2']"
+
+
+@pytest.fixture
+def claim_dir(tmp_path, monkeypatch):
+    import robot_infra.devices.claims as claims
+
+    monkeypatch.setattr(claims, "_DEFAULT_LOCK_DIR", tmp_path / "claims")
+
+
+def test_doctor_fails_handshake_when_robot_is_claimed(claim_dir):
+    config = franka_config()
+    with DeviceClaim(claim_key(Robot.from_config(config))):
+        results = run_doctor(config)
+    handshake = next(r for r in results if r.name == "handshake")
+    assert not handshake.ok and "claimed by another process" in handshake.message
+    assert "claim: false" in handshake.hint
+    assert exit_code(results) == 1
+
+
+def test_doctor_releases_claim_afterwards(claim_dir):
+    config = franka_config()
+    assert exit_code(run_doctor(config)) == 0
+    with DeviceClaim(claim_key(Robot.from_config(config))):
+        pass

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rlgarden-robot-infra"
 version = "0.0.1"
-description = "Robot hardware/communication/control layer for rl-garden: impedance and pose controllers, the Franka Flask bridge and gripper server, and teleop devices (SpaceMouse, twist-based Pico teleop)."
+description = "Robot infrastructure for rl-garden: a device layer (arms, grippers, cameras), hardware discovery and a layered doctor, a robot daemon with a remote mirror, plus legacy controllers and teleop."
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",

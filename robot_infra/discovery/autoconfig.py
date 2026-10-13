@@ -64,3 +64,8 @@ def load_config(path: str | Path) -> RobotConfig:
     if "type" not in data:
         raise ValueError(f"robot config has no 'type'; registered: {sorted(Robot.types())}")
     return Robot.types()[str(data["type"]).lower()].CONFIG.from_dict(data)
+
+
+def load_config_with_env(path: str | Path) -> RobotConfig:
+    """``load_config`` plus ``fill_from_env``: the one config view shared by daemon, doctor and discovery."""
+    return fill_from_env(load_config(path))

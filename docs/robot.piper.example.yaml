@@ -1,0 +1,17 @@
+# AgileX Piper (6-DoF) over SocketCAN, gripper on the same CAN session.
+# Load with Robot.from_yaml(path). Omitted keys take the PiperConfig defaults shown.
+type: piper
+name: piper                   # default "piper"
+arm_backend: pyagxarm         # pyagxarm (default, pyAgxArm SDK) | piper_sdk (vendor SDK) | fake
+can_interface: can0           # SocketCAN interface (default can0)
+bitrate: 1000000              # must match `ip -details link show can0` (default 1000000)
+firmware_profile: null        # pyagxarm only: default | v183 | v188 | v189; null probes the arm
+home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # 6 values, rad (default shown)
+claim: true
+gripper:
+  backend: pyagxarm           # must match the arm: pyagxarm | piper_sdk
+  max_width_m: 0.07           # 0.07 or 0.1, as configured on the teach pendant
+  mode: continuous            # continuous (default for Piper) | binary
+  binary_threshold: 0.5
+  shares_arm_session: true    # required: the Piper gripper borrows the arm's CAN session
+cameras: []

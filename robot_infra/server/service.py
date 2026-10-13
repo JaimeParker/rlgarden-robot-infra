@@ -12,7 +12,7 @@ import numpy as np
 
 from robot_infra.devices.arm import ControlMode
 from robot_infra.devices.base import PartGroup
-from robot_infra.devices.claims import DeviceClaim
+from robot_infra.devices.claims import DeviceClaim, claim_key
 from robot_infra.devices.errors import DeviceFault, DeviceNotFound
 from robot_infra.devices.gripper import Gripper
 from robot_infra.devices.robot import Robot
@@ -46,12 +46,6 @@ METHODS = (
     CAMERA_READ_METHOD,
 )
 _WATCHDOG_JOIN_TIMEOUT_S = 2.0
-
-
-def claim_key(robot: Robot) -> str:
-    config = robot.config
-    address = getattr(config, "robot_ip", None) or getattr(config, "can_interface", None) or config.name
-    return f"{robot.ROBOT_TYPE}:{address}"
 
 
 class RobotService:

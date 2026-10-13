@@ -130,3 +130,10 @@ def test_type_registry():
     with pytest.raises(ValueError, match="mismatch"):
         Robot.register_type(Mismatched)
     assert "mismatch" not in Robot.types()
+
+
+def test_unknown_camera_key_names_key_and_config():
+    from robot_infra.devices import RobotConfig
+
+    with pytest.raises(ValueError, match="unknown key 'fpss' for CameraConfig"):
+        RobotConfig.from_dict({"cameras": [{"name": "wrist", "fpss": 30}]})

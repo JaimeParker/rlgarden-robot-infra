@@ -624,3 +624,13 @@ def test_stop_refuses_stale_feedback(arm, sdk, monkeypatch):
     with pytest.raises(DeviceFault, match="stale"):
         arm.stop()
     assert sdk.calls("move_j") == []
+
+
+@pytest.mark.parametrize("backend_cls", [AgxArm, AgxGripper])
+def test_missing_sdk_hint_points_to_extra(monkeypatch, backend_cls):
+    from robot_infra.devices import SdkMissing
+
+    monkeypatch.setitem(sys.modules, "pyAgxArm", None)
+    with pytest.raises(SdkMissing) as info:
+        backend_cls.require_sdk()
+    assert info.value.hint == "pip install 'rlgarden-robot-infra[pyagxarm]'  (pyAgxArm is installed from GitHub)"

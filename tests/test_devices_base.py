@@ -217,7 +217,7 @@ def test_device_claim_is_exclusive_and_context_managed(tmp_path):
     first.acquire()
     with pytest.raises(DeviceBusy) as info:
         second.acquire()
-    assert "claim=False" in info.value.hint
+    assert "set `claim: false` in the robot config" in info.value.hint
     first.release()
     first.release()
     second.acquire()

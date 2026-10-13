@@ -6,18 +6,32 @@ are never called: both cut motor power, and a raised Piper falls.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import time
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
 from robot_infra.devices.arm import Arm, ArmHealth, ControlMode
 from robot_infra.devices.backends.arms._rotations import quat_xyzw_to_rpy, rpy_to_quat_xyzw
-from robot_infra.devices.errors import DeviceFault, DeviceNotFound
+from robot_infra.devices.errors import DeviceFault, DeviceNotFound, SdkMissing
 
 if TYPE_CHECKING:
     from robot_infra.devices.robot import RobotConfig
     from robot_infra.doctor.checks import CheckResult
+
+def require_pyagxarm(device_cls: type) -> ModuleType:
+    """Import pyAgxArm; it is installed from GitHub, not PyPI."""
+    try:
+        return importlib.import_module("pyAgxArm")
+    except ImportError:
+        raise SdkMissing(
+            f"{device_cls.__name__} needs the 'pyAgxArm' package",
+            hint="pip install 'rlgarden-robot-infra[pyagxarm]'  (pyAgxArm is installed from GitHub)",
+            device=device_cls.__name__,
+        ) from None
+
 
 PIPER_MODEL = "piper"
 PIPER_NUM_JOINTS = 6
@@ -51,6 +65,10 @@ class AgxArm(Arm):
     is the flange pose: no TCP offset is configured on the SDK."""
 
     SDK = "pyAgxArm"
+
+    @classmethod
+    def require_sdk(cls) -> ModuleType:
+        return require_pyagxarm(cls)
     SUPPORTED_STATE_FIELDS = ("tcp_pose", "joint_pos", "joint_vel")
     ENABLE_TIMEOUT_S = 5.0
     FEEDBACK_TIMEOUT_S = 2.0

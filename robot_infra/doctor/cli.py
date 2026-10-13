@@ -4,7 +4,7 @@ import argparse
 import dataclasses
 import json
 
-from robot_infra.discovery.autoconfig import load_config
+from robot_infra.discovery.autoconfig import load_config_with_env
 from robot_infra.doctor.checks import CheckResult, exit_code, run_doctor, summarize
 
 _LAYER_COUNT = 5
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fix", action="store_true", help="run autofixes for failed checks")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    config = load_config_with_env(args.config)
     results = run_doctor(config, mock=args.mock, fix=args.fix)
     print(format_json(results) if args.json else format_text(results))
     return exit_code(results)

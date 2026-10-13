@@ -76,7 +76,7 @@ class RealSenseCamera(Camera):
             if serial not in found:
                 raise DeviceNotFound(
                     f"RealSense serial '{serial}' for camera '{self.name}' not attached",
-                    hint=f"discovered: {sorted(found)}; run `python -m robot_infra.discover`",
+                    hint=f"discovered: {sorted(found)}; run `python -m robot_infra.discovery`",
                     device=self.name,
                 )
             return serial
@@ -85,7 +85,7 @@ class RealSenseCamera(Camera):
         if not found:
             raise DeviceNotFound(
                 f"no RealSense device found for camera '{self.name}'",
-                hint="plug in the camera and run `python -m robot_infra.discover`",
+                hint="plug in the camera and run `python -m robot_infra.discovery`",
                 device=self.name,
             )
         raise DeviceNotFound(

@@ -8,6 +8,7 @@ import pytest
 import robot_infra.devices.claims as claims
 import robot_infra.server.daemon as daemon
 from robot_infra.devices.robots.franka import FrankaRobot
+from robot_infra.discovery import enumerate as probes
 from robot_infra.doctor.checks import CheckResult
 from robot_infra.server.transport import Transport
 
@@ -120,3 +121,11 @@ def test_passing_preflight_serves(config_path, stub_transport, monkeypatch, caps
     assert daemon.main(["--config", config_path]) == 0
     assert "summary: 1 ok, 0 failed, 0 skipped" in capsys.readouterr().out
     assert stub_transport.served is not None
+
+
+def test_fake_config_starts_with_preflight(config_path, stub_transport, monkeypatch):
+    monkeypatch.setattr(probes, "ping", lambda ip, timeout_s=1.0: False)
+    assert daemon.main(["--config", config_path, "--bind", "127.0.0.1:0"]) == 0
+    assert stub_transport.served is not None
+    service, _ = daemon.build_daemon(["--config", config_path])
+    service.close()

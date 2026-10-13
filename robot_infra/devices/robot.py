@@ -73,6 +73,9 @@ class RobotConfig:
         if "gripper" in values and values["gripper"] is not None:
             values["gripper"] = GripperConfig.from_dict(values["gripper"])
         if "cameras" in values:
+            camera_keys = {f.name for f in dataclasses.fields(CameraConfig)}
+            for camera in values["cameras"]:
+                _check_known_keys(CameraConfig, camera, camera_keys)
             values["cameras"] = [CameraConfig(**camera) for camera in values["cameras"]]
         return cls(**values)
 
